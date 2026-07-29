@@ -62,6 +62,91 @@ jobs:
           jq empty package/luci-app-engsel/root/usr/share/rpcd/acl.d/luci-app-engsel.json
           sh -n package/openwrt/files/engsel.wrapper
 
+      - name: Validate Decoy and CLI source contracts
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+          active_keys = [
+              'DECOY_PREPAID_FAMILY_CODE',
+              'DECOY_PREPAID_PACKAGE_NUMBER',
+              'DECOY_PRIORITAS_FAMILY_CODE',
+              'DECOY_PRIORITAS_PACKAGE_NUMBER',
+              'DECOY_PRIOHYBRID_FAMILY_CODE',
+              'DECOY_PRIOHYBRID_PACKAGE_NUMBER',
+          ]
+          active_surfaces = [
+              root / 'src/engsel.c',
+              root / 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel/settings.js',
+              root / 'package/openwrt/files/engsel.wrapper',
+              root / 'package/openwrt/files/engsel.env',
+              root / 'package/openwrt/files/engsel.env.example',
+              root / 'package/openwrt/Makefile',
+              root / 'README.md',
+          ]
+          for path in active_surfaces:
+              text = path.read_text(encoding='utf-8')
+              missing = [key for key in active_keys if key not in text]
+              assert not missing, f'{path}: missing active Decoy keys {missing}'
+
+          legacy_keys = [
+              'DECOY_PREPAID_OPTION_CODE',
+              'DECOY_PRIORITAS_OPTION_CODE',
+              'DECOY_PRIOHYBRID_OPTION_CODE',
+              'DECOY_BALANCE_OPTION_CODE',
+          ]
+          for path in active_surfaces:
+              text = path.read_text(encoding='utf-8')
+              present = [key for key in legacy_keys if key in text]
+              assert not present, f'{path}: legacy Decoy keys still active/exposed {present}'
+
+          source = (root / 'src/engsel.c').read_text(encoding='utf-8')
+          assert 'Balance + Decoy Standard' not in source
+          assert '7. Beli Semua Paket dalam Family Code (Loop)' in source
+          assert 'purchase-by-family' in source
+          assert 'Pulsa N Kali' in source
+          assert '82772' not in source
+          assert '#define DECOY_V2_PAYMENT_FOR "\\xF0\\x9F\\xA4\\xAB"' in source
+          assert '#define FAMILY_LOOP_PAYMENT_FOR "\\xF0\\x9F\\xA4\\x91"' in source
+          prepaid_builtin = 'return find_family_option_code_context(t,"b0a20d74-0c54-4e3b-8f3f-01e7482e50bf","719d093f-6f8d-46a4-8390-6a0003a172ea",1,"true","NONE",err);'
+          assert prepaid_builtin in source, 'built-in PREPAID decoy must keep the pinned upstream family/variant/context'
+          assert 'family_purchase_start_index' in source, 'family loop start must follow API option order'
+          resolver = source[source.index('static int decoy_quote_resolve('):source.index('static int payment_quotes_reload_current(')]
+          assert resolver.count('decoy_quote_resolve_once(') == 2, 'code 151 resolver must retry at most once'
+          assert resolver.count('api_retry_auth(') == 1, 'resolver must perform one fresh-token retry'
+          assert 'response_cache_' not in resolver, 'resolved option code must not use a global response cache'
+
+          luci_sources = '\n'.join(
+              path.read_text(encoding='utf-8')
+              for path in (root / 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel').glob('*.js')
+          )
+          for cli_only in ('purchase-n-times', 'purchase-by-family', 'Pulsa N Kali'):
+              assert cli_only not in luci_sources, f'CLI-only feature leaked into LuCI: {cli_only}'
+
+          backend_makefile = (root / 'package/openwrt/Makefile').read_text(encoding='utf-8')
+          luci_makefile = (root / 'package/luci-app-engsel/Makefile').read_text(encoding='utf-8')
+          readme = (root / 'README.md').read_text(encoding='utf-8')
+          backend_release = re.search(r'^PKG_RELEASE:=(\d+)$', backend_makefile, re.M).group(1)
+          luci_release = re.search(r'^PKG_RELEASE:=(\d+)$', luci_makefile, re.M).group(1)
+          source_release = re.search(r'^#define ENGSEL_VERSION "1\.0\.0-r(\d+)"$', source, re.M).group(1)
+          assert backend_release == source_release == '7'
+          assert luci_release == '6'
+          assert 'engsel            1.0.0-r7' in readme
+          assert 'luci-app-engsel  1.0.0-r6' in readme
+          PY
+
+      - name: Run native resolver unit tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev
+          cc -std=c99 -Wall -Wextra -Werror=misleading-indentation -Wno-unused-parameter \
+            .github/ci/decoy_resolver_test.c -lmbedcrypto -o /tmp/engsel-decoy-resolver-test
+          /tmp/engsel-decoy-resolver-test
+
   prepare:
     runs-on: ubuntu-24.04
     outputs:

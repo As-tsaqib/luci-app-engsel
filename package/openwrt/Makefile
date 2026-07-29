@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=engsel
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=engsel users
 
@@ -29,7 +29,7 @@ define Build/Prepare
 endef
 
 define Build/Compile
-	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -std=c99 -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections \
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -std=c99 -Wall -Wextra -Werror=misleading-indentation -Wno-unused-parameter -ffunction-sections -fdata-sections \
 		$(TARGET_LDFLAGS) -Wl,--gc-sections \
 		-o $(PKG_BUILD_DIR)/engsel $(PKG_BUILD_DIR)/src/engsel.c -lmbedcrypto
 endef
@@ -63,7 +63,7 @@ if [ ! -f /etc/engsel/.env ]; then
 fi
 if command -v uci >/dev/null 2>&1; then
 	uci -q get engsel.config >/dev/null || uci set engsel.config=engsel || exit 1
-	for key in BASE_API_URL BASE_CIAM_URL BASIC_AUTH AX_FP_KEY UA API_KEY ENCRYPTED_FIELD_KEY XDATA_KEY AX_API_SIG_KEY X_API_BASE_SECRET DECOY_PREPAID_OPTION_CODE DECOY_PRIORITAS_OPTION_CODE DECOY_PRIOHYBRID_OPTION_CODE DECOY_BALANCE_OPTION_CODE; do
+	for key in BASE_API_URL BASE_CIAM_URL BASIC_AUTH AX_FP_KEY UA API_KEY ENCRYPTED_FIELD_KEY XDATA_KEY AX_API_SIG_KEY X_API_BASE_SECRET DECOY_PREPAID_FAMILY_CODE DECOY_PREPAID_PACKAGE_NUMBER DECOY_PRIORITAS_FAMILY_CODE DECOY_PRIORITAS_PACKAGE_NUMBER DECOY_PRIOHYBRID_FAMILY_CODE DECOY_PRIOHYBRID_PACKAGE_NUMBER; do
 		[ -n "$$(uci -q get engsel.config.$${key})" ] && continue
 		value="$$(sed -n "s/^$${key}=//p" /etc/engsel.env /etc/engsel/.env 2>/dev/null | tail -n1)"
 		if [ -n "$${value}" ]; then
@@ -80,7 +80,7 @@ if command -v uci >/dev/null 2>&1; then
 	trap cleanup 0
 	trap 'cleanup; exit 1' 1 2 3 15
 	if ! {
-		for key in BASE_API_URL BASE_CIAM_URL BASIC_AUTH AX_FP_KEY UA API_KEY ENCRYPTED_FIELD_KEY XDATA_KEY AX_API_SIG_KEY X_API_BASE_SECRET DECOY_PREPAID_OPTION_CODE DECOY_PRIORITAS_OPTION_CODE DECOY_PRIOHYBRID_OPTION_CODE DECOY_BALANCE_OPTION_CODE; do
+		for key in BASE_API_URL BASE_CIAM_URL BASIC_AUTH AX_FP_KEY UA API_KEY ENCRYPTED_FIELD_KEY XDATA_KEY AX_API_SIG_KEY X_API_BASE_SECRET DECOY_PREPAID_FAMILY_CODE DECOY_PREPAID_PACKAGE_NUMBER DECOY_PRIORITAS_FAMILY_CODE DECOY_PRIORITAS_PACKAGE_NUMBER DECOY_PRIOHYBRID_FAMILY_CODE DECOY_PRIOHYBRID_PACKAGE_NUMBER; do
 			value="$$(uci -q get engsel.config.$${key} 2>/dev/null)" || value=
 			[ -n "$${value}" ] || continue
 			printf '%s=%s\n' "$${key}" "$${value}" || exit 1

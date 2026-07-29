@@ -31,8 +31,9 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-#define ENGSEL_VERSION "1.0.0-r6"
+#define ENGSEL_VERSION "1.0.0-r7"
 #define DECOY_V2_PAYMENT_FOR "\xF0\x9F\xA4\xAB"
+#define FAMILY_LOOP_PAYMENT_FOR "\xF0\x9F\xA4\x91"
 #define TOKEN_CACHE_TTL_SEC 240
 #define HTTP_RESPONSE_MAX (2U * 1024U * 1024U)
 #define RESPONSE_CACHE_MAX (1U * 1024U * 1024U)
@@ -43,7 +44,14 @@
 #define TIERING_CACHE_TTL_SEC 30
 #define STORE_CACHE_TTL_SEC 300
 
-typedef struct { char base_api_url[256], base_ciam_url[256], basic_auth[512], ax_fp_key[128], ua[512], api_key[256], encrypted_field_key[128], xdata_key[128], ax_api_sig_key[256], x_api_base_secret[256], decoy_prepaid_option_code[256], decoy_prioritas_option_code[256], decoy_priohybrid_option_code[256], decoy_balance_option_code[256], home[PATH_MAX], env_path[PATH_MAX]; } Config;
+typedef struct {
+	char base_api_url[256], base_ciam_url[256], basic_auth[512], ax_fp_key[128], ua[512], api_key[256];
+	char encrypted_field_key[128], xdata_key[128], ax_api_sig_key[256], x_api_base_secret[256];
+	char decoy_prepaid_family_code[256], decoy_prepaid_package_number[32];
+	char decoy_prioritas_family_code[256], decoy_prioritas_package_number[32];
+	char decoy_priohybrid_family_code[256], decoy_priohybrid_package_number[32];
+	char home[PATH_MAX], env_path[PATH_MAX];
+} Config;
 typedef struct { char *number, *subscriber_id, *subscription_type, *refresh_token; int dirty, is_new; } Account;
 typedef struct { Account *items; size_t len, loaded_len; char **deleted; size_t deleted_len, deleted_cap; } Accounts;
 typedef struct { char *access_token, *id_token, *refresh_token; int cached; } Tokens;
@@ -53,6 +61,8 @@ typedef struct { QuotaPkg *v; size_t n, cap; } QuotaList;
 typedef struct { char *item_code,*item_name,*family,*validity,*payment_for,*token_confirmation; long long price,balance,timestamp; } PaymentQuote;
 typedef struct { char code[256], name[256]; long long price; } CartItem;
 typedef struct { int count,use_decoy,token_idx_raw,token_idx; unsigned int delay_seconds; } RepeatPurchaseOptions;
+typedef struct { int use_decoy,pause_on_success,start_option; unsigned int delay_seconds; } FamilyPurchaseOptions;
+typedef struct { const char *category,*family_code; int package_number,configured,prioritas_fallback; } DecoyConfigChoice;
 
 static Config cfg; static int json_payment_confirmed;
 static const char *config_missing(void);
@@ -60,6 +70,7 @@ static void json_str(const char *s);
 static int arg_true(const char *s);
 static int api_auth_failed(const char *resp);
 static int api_success_response(const char *resp);
+static int api_error_151(const char *response);
 static char *unsubscribe_quota_once(Accounts *a,Account *acc,Tokens *t,const char *quota_code,const char *subtype,const char *domain);
 static Account *accounts_find(Accounts *a,const char *number);
 static void accounts_put(Accounts *a,const char *number,const char *sub,const char *typ,const char *rt);
@@ -239,7 +250,7 @@ static char *http_fetch(const char *url, const char *method, StrList *headers, c
 	return out;
 }
 static int response_cache_dir_ready(void){ struct stat st; if(!mkdir(RESPONSE_CACHE_DIR,0700)) return 1; if(errno!=EEXIST||lstat(RESPONSE_CACHE_DIR,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=geteuid()) return 0; chmod(RESPONSE_CACHE_DIR,0700); return 1; }
-static void response_cache_config_tag(char out[17]){ const char *v[]={cfg.base_api_url,cfg.base_ciam_url,cfg.basic_auth,cfg.ax_fp_key,cfg.ua,cfg.api_key,cfg.encrypted_field_key,cfg.xdata_key,cfg.ax_api_sig_key,cfg.x_api_base_secret,cfg.decoy_prepaid_option_code,cfg.decoy_prioritas_option_code,cfg.decoy_priohybrid_option_code,cfg.decoy_balance_option_code}; uint64_t h=UINT64_C(1469598103934665603); for(size_t i=0;i<sizeof(v)/sizeof(v[0]);i++){ for(const unsigned char *p=(const unsigned char *)v[i];*p;p++){ h^=*p; h*=UINT64_C(1099511628211); } h^=0xffU; h*=UINT64_C(1099511628211); } snprintf(out,17,"%016llx",(unsigned long long)h); }
+static void response_cache_config_tag(char out[17]){ const char *v[]={cfg.base_api_url,cfg.base_ciam_url,cfg.basic_auth,cfg.ax_fp_key,cfg.ua,cfg.api_key,cfg.encrypted_field_key,cfg.xdata_key,cfg.ax_api_sig_key,cfg.x_api_base_secret,cfg.decoy_prepaid_family_code,cfg.decoy_prepaid_package_number,cfg.decoy_prioritas_family_code,cfg.decoy_prioritas_package_number,cfg.decoy_priohybrid_family_code,cfg.decoy_priohybrid_package_number}; uint64_t h=UINT64_C(1469598103934665603); for(size_t i=0;i<sizeof(v)/sizeof(v[0]);i++){ for(const unsigned char *p=(const unsigned char *)v[i];*p;p++){ h^=*p; h*=UINT64_C(1099511628211); } h^=0xffU; h*=UINT64_C(1099511628211); } snprintf(out,17,"%016llx",(unsigned long long)h); }
 static void response_cache_path(char *out,size_t sz,Account *acc,const char *key){ char account[96],name[96],tag[17]; size_t ai=0,ni=0; const char *number=acc&&acc->number?acc->number:"active"; for(size_t i=0;number[i]&&ai+1<sizeof(account);i++) account[ai++]=(isalnum((unsigned char)number[i])||number[i]=='_'||number[i]=='-')?number[i]:'_'; account[ai]=0; for(size_t i=0;key&&key[i]&&ni+1<sizeof(name);i++) name[ni++]=(isalnum((unsigned char)key[i])||key[i]=='_'||key[i]=='-')?key[i]:'_'; name[ni]=0; response_cache_config_tag(tag); snprintf(out,sz,"%s/%s-%s-%s.json",RESPONSE_CACHE_DIR,account[0]?account:"active",tag,name[0]?name:"data"); }
 static int response_cache_shape_valid(const char *key,const char *data){ const char *start,*end; if(!strcmp(key,"quota")) return !json_array_span(data,"quotas",&start,&end); if(!strcmp(key,"balance")) return json_find_key(data,"remaining")!=NULL; if(!strcmp(key,"tiering")) return json_find_key(data,"tier")||json_find_key(data,"current_point"); if(starts_with(key,"segments-")) return !json_array_span(data,"store_segments",&start,&end); if(starts_with(key,"shop-")){ const char *keys[]={"results_price_only","results","packages"}; return !json_array_span_any(data,keys,3,&start,&end); } if(starts_with(key,"families-")) return !json_array_span(data,"results",&start,&end); return 1; }
 static char *response_cache_load(Account *acc,const char *key,int ttl){ if(ttl<=0||!response_cache_dir_ready()) return NULL; char path[PATH_MAX]; struct stat st; response_cache_path(path,sizeof(path),acc,key); if(lstat(path,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||(unsigned long long)st.st_size>RESPONSE_CACHE_MAX) return NULL; time_t now=time(NULL); if(st.st_mtime>now||now-st.st_mtime>=ttl){ unlink(path); return NULL; } char *data=read_file(path); if(!data||!json_document_ok(data)||!response_cache_shape_valid(key,data)){ free(data); unlink(path); return NULL; } return data; }
@@ -286,7 +297,31 @@ static char *get_redeemables_api(Tokens *t,int is_enterprise){ char *payload=xas
 static char *get_store_segments(Tokens *t,int is_enterprise){ char *payload=xasprintf("{\"is_enterprise\":%s,\"lang\":\"en\"}",is_enterprise?"true":"false"); char *resp=api_request("api/v8/configs/store/segments",payload,t->id_token); free(payload); return resp; }
 static char *get_store_packages(Tokens *t,const char *subs_type,int is_enterprise){ char *st=json_escape(subs_type&&*subs_type?subs_type:"PREPAID"); char *payload=xasprintf("{\"is_enterprise\":%s,\"filters\":[{\"unit\":\"THOUSAND\",\"id\":\"FIL_SEL_P\",\"type\":\"PRICE\",\"items\":[]},{\"unit\":\"GB\",\"id\":\"FIL_SEL_MQ\",\"type\":\"DATA_TYPE\",\"items\":[]},{\"unit\":\"PACKAGE_NAME\",\"id\":\"FIL_PKG_N\",\"type\":\"PACKAGE_NAME\",\"items\":[{\"id\":\"\",\"label\":\"\"}]},{\"unit\":\"DAY\",\"id\":\"FIL_SEL_V\",\"type\":\"VALIDITY\",\"items\":[]}],\"substype\":\"%s\",\"text_search\":\"\",\"lang\":\"en\"}",is_enterprise?"true":"false",st); char *resp=api_request("api/v9/xl-stores/options/search",payload,t->id_token); free(st); free(payload); return resp; }
 static char *get_store_family_list(Tokens *t,const char *subs_type,int is_enterprise){ char *st=json_escape(subs_type&&*subs_type?subs_type:"PREPAID"); char *payload=xasprintf("{\"is_enterprise\":%s,\"subs_type\":\"%s\",\"lang\":\"en\"}",is_enterprise?"true":"false",st); char *resp=api_request("api/v8/xl-stores/options/search/family-list",payload,t->id_token); free(st); free(payload); return resp; }
-static char *get_store_family_packages(Tokens *t,const char *family_code,const char *enterprise_arg){ const char *migrations[]={"NONE","PRE_TO_PRIOH","PRIOH_TO_PRIO","PRIO_TO_PRIOH"}; int enterprise_values[2]={0,1},enterprise_n=2; if(enterprise_arg&&*enterprise_arg){ enterprise_values[0]=arg_true(enterprise_arg); enterprise_n=1; } char *fc=json_escape(family_code),*last=NULL; for(size_t mi=0;mi<sizeof(migrations)/sizeof(migrations[0]);mi++){ for(int ei=0;ei<enterprise_n;ei++){ char *payload=xasprintf("{\"is_show_tagging_tab\":true,\"is_dedicated_event\":true,\"is_transaction_routine\":false,\"migration_type\":\"%s\",\"package_family_code\":\"%s\",\"is_autobuy\":false,\"is_enterprise\":%s,\"is_pdlp\":true,\"referral_code\":\"\",\"is_migration\":false,\"lang\":\"en\"}",migrations[mi],fc,enterprise_values[ei]?"true":"false"); char *resp=api_request("api/v8/xl-stores/options/list",payload,t->id_token); free(payload); char *status=json_get_string(resp,"status"),*data=json_object_dup(resp,"data"),*family=data?json_object_dup(data,"package_family"):NULL,*name=family?json_get_string(family,"name"):NULL; int ok=status&&!strcmp(status,"SUCCESS")&&name&&*name; free(status); free(data); free(family); free(name); if(ok){ free(last); free(fc); return resp; } free(last); last=resp; } } free(fc); return last?last:xstrdup("{\"status\":\"FAILED\",\"message\":\"family not found\"}"); }
+static char *get_store_family_packages_context(Tokens *t,const char *family_code,const char *enterprise_arg,const char *migration_arg){
+	const char *migrations[]={"NONE","PRE_TO_PRIOH","PRIOH_TO_PRIO","PRIO_TO_PRIOH"};
+	size_t migration_n=sizeof(migrations)/sizeof(migrations[0]);
+	if(migration_arg&&*migration_arg){ migrations[0]=migration_arg; migration_n=1; }
+	int enterprise_values[2]={0,1},enterprise_n=2;
+	if(enterprise_arg&&*enterprise_arg){ enterprise_values[0]=arg_true(enterprise_arg); enterprise_n=1; }
+	char *fc=json_escape(family_code),*last=NULL,*error_151=NULL;
+	for(size_t mi=0;mi<migration_n;mi++){
+		for(int ei=0;ei<enterprise_n;ei++){
+			char *payload=xasprintf("{\"is_show_tagging_tab\":true,\"is_dedicated_event\":true,\"is_transaction_routine\":false,\"migration_type\":\"%s\",\"package_family_code\":\"%s\",\"is_autobuy\":false,\"is_enterprise\":%s,\"is_pdlp\":true,\"referral_code\":\"\",\"is_migration\":false,\"lang\":\"en\"}",migrations[mi],fc,enterprise_values[ei]?"true":"false");
+			char *resp=api_request("api/v8/xl-stores/options/list",payload,t->id_token);
+			free(payload);
+			char *status=json_get_string(resp,"status"),*data=json_object_dup(resp,"data"),*family=data?json_object_dup(data,"package_family"):NULL,*name=family?json_get_string(family,"name"):NULL;
+			int ok=status&&!strcmp(status,"SUCCESS")&&name&&*name;
+			free(status); free(data); free(family); free(name);
+			if(ok){ free(last); free(error_151); free(fc); return resp; }
+			if(!error_151&&api_error_151(resp)) error_151=xstrdup(resp);
+			free(last); last=resp;
+		}
+	}
+	free(fc);
+	if(error_151){ free(last); return error_151; }
+	return last?last:xstrdup("{\"status\":\"FAILED\",\"message\":\"family not found\"}");
+}
+static char *get_store_family_packages(Tokens *t,const char *family_code,const char *enterprise_arg){ return get_store_family_packages_context(t,family_code,enterprise_arg,NULL); }
 static char *unsubscribe_quota(Tokens *t,const char *quota_code,const char *subtype,const char *domain){ char *qc=json_escape(quota_code),*st=json_escape(subtype?subtype:""),*dm=json_escape(domain?domain:""); char *payload=xasprintf("{\"product_subscription_type\":\"%s\",\"quota_code\":\"%s\",\"product_domain\":\"%s\",\"is_enterprise\":false,\"unsubscribe_reason_code\":\"\",\"lang\":\"en\",\"family_member_id\":\"\"}",st,qc,dm); char *resp=api_request("api/v8/packages/unsubscribe",payload,t->id_token); free(qc); free(st); free(dm); free(payload); return resp; }
 
 static const char *payment_config_missing(void){ const char *m=config_missing(); if(m) return m; if(!cfg.encrypted_field_key[0]) return "ENCRYPTED_FIELD_KEY"; return NULL; }
@@ -298,7 +333,7 @@ static char *get_package_detail_api(Tokens *t,const char *option_code){ return g
 static char *intercept_page_api(Tokens *t,const char *option_code){ char *oc=json_escape(option_code); char *payload=xasprintf("{\"is_enterprise\":false,\"lang\":\"en\",\"package_option_code\":\"%s\"}",oc); char *resp=api_request("misc/api/v8/utility/intercept-page",payload,t->id_token); free(oc); free(payload); return resp; }
 static char *payment_methods_api(Tokens *t,PaymentQuote *q){ char *ic=json_escape(q->item_code),*tc=json_escape(q->token_confirmation); char *payload=xasprintf("{\"payment_type\":\"PURCHASE\",\"is_enterprise\":false,\"payment_target\":\"%s\",\"lang\":\"en\",\"is_referral\":false,\"token_confirmation\":\"%s\"}",ic,tc); char *resp=api_request("payments/api/v8/payment-methods-option",payload,t->id_token); free(ic); free(tc); free(payload); return resp; }
 static void payment_quote_free(PaymentQuote *q){ free(q->item_code); free(q->item_name); free(q->family); free(q->validity); free(q->payment_for); free(q->token_confirmation); memset(q,0,sizeof(*q)); }
-static int payment_quote_load(Tokens *t,const char *option_code,PaymentQuote *q,char **err){ char *detail=get_package_detail_api(t,option_code); if(!strstr(detail,"\"data\"")){ if(err) *err=xasprintf("package detail failed: %s",detail); free(detail); return -1; } char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail); char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}"); char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}"); char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}"); char *option_name=json_get_string(option,"name"),*variant_name=json_get_string(variant,"name"),*family_name=json_get_string(family,"name"),*validity=json_get_string(option,"validity"),*payment_for=json_get_string(family,"payment_for"),*token=json_get_string(data,"token_confirmation"); long long price=json_get_ll_any(option,"price",-1),timestamp=json_get_ll_any(data,"timestamp",-1); if(!token||price<0){ if(err) *err=xasprintf("package fields missing"); free(detail); free(data); free(option); free(family); free(variant); free(option_name); free(variant_name); free(family_name); free(validity); free(payment_for); free(token); return -1; } char *item_name=NULL; if(variant_name&&*variant_name&&option_name&&*option_name) item_name=xasprintf("%s %s",variant_name,option_name); else item_name=xstrdup(option_name&&*option_name?option_name:(variant_name&&*variant_name?variant_name:option_code)); if(!payment_for||!*payment_for){ free(payment_for); payment_for=xstrdup("BUY_PACKAGE"); } q->item_code=xstrdup(option_code); q->item_name=item_name; q->family=xstrdup(family_name?family_name:""); q->validity=xstrdup(validity?validity:""); q->payment_for=xstrdup(payment_for); q->token_confirmation=xstrdup(token); q->price=price; q->balance=-1; q->timestamp=timestamp; free(detail); free(data); free(option); free(family); free(variant); free(option_name); free(variant_name); free(family_name); free(validity); free(payment_for); free(token); return 0; }
+static int payment_quote_load(Tokens *t,const char *option_code,PaymentQuote *q,char **err){ char *detail=get_package_detail_api(t,option_code); if(!strstr(detail,"\"data\"")){ if(err) *err=xasprintf("package detail failed: %s",detail); free(detail); return -1; } char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail); char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}"); char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}"); char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}"); char *option_name=json_get_string(option,"name"),*variant_name=json_get_string(variant,"name"),*family_name=json_get_string(family,"name"),*validity=json_get_string(option,"validity"),*payment_for=json_get_string(family,"payment_for"),*token=json_get_string(data,"token_confirmation"); long long price=json_get_ll_any(option,"price",-1),timestamp=json_get_ll_any(data,"timestamp",-1); if(!token||price<0){ if(err) *err=xasprintf("package fields missing: %s",detail); free(detail); free(data); free(option); free(family); free(variant); free(option_name); free(variant_name); free(family_name); free(validity); free(payment_for); free(token); return -1; } char *item_name=NULL; if(variant_name&&*variant_name&&option_name&&*option_name) item_name=xasprintf("%s %s",variant_name,option_name); else item_name=xstrdup(option_name&&*option_name?option_name:(variant_name&&*variant_name?variant_name:option_code)); if(!payment_for||!*payment_for){ free(payment_for); payment_for=xstrdup("BUY_PACKAGE"); } q->item_code=xstrdup(option_code); q->item_name=item_name; q->family=xstrdup(family_name?family_name:""); q->validity=xstrdup(validity?validity:""); q->payment_for=xstrdup(payment_for); q->token_confirmation=xstrdup(token); q->price=price; q->balance=-1; q->timestamp=timestamp; free(detail); free(data); free(option); free(family); free(variant); free(option_name); free(variant_name); free(family_name); free(validity); free(payment_for); free(token); return 0; }
 static void payment_quote_print_json(PaymentQuote *q){ printf("{\"product\":{\"code\":"); json_str(q->item_code); printf(",\"name\":"); json_str(q->item_name); printf(",\"family\":"); json_str(q->family); printf(",\"validity\":"); json_str(q->validity); printf(",\"payment_for\":"); json_str(q->payment_for); printf(",\"price\":%lld,\"timestamp\":%lld},\"pulsa\":{\"balance\":%lld}}",q->price,q->timestamp,q->balance); }
 static int payment_token_index(int n,int idx){ if(idx<0) idx=n+idx; return (idx>=0&&idx<n)?idx:0; }
 static char *payment_pulsa_settle_many_ex(Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,int token_idx,const char *payment_for_override){ if(n<1) return xstrdup("{\"status\":\"FAILED\",\"message\":\"empty cart\"}"); int ti=payment_token_index(n,token_idx); const char *payment_for=payment_for_override?payment_for_override:q[0].payment_for; char *intercept=intercept_page_api(t,q[0].item_code); free(intercept); char *methods=payment_methods_api(t,&q[ti]); if(api_auth_failed(methods)) mutation_result(acc,t,methods); char *status=json_get_string(methods,"status"),*token_payment=json_get_string(methods,"token_payment"); long long payment_ts=json_get_ll_any(methods,"timestamp",-1); if(!status||strcmp(status,"SUCCESS")||!token_payment||payment_ts<0){ char *err=xasprintf("{\"status\":\"FAILED\",\"message\":\"payment methods failed\",\"response\":%s}",methods?methods:"null"); free(status); free(token_payment); free(methods); return err; } char *targets=xstrdup(""),*items=xstrdup(""); for(int i=0;i<n;i++){ char *old=targets; targets=xasprintf("%s%s%s",old,i?";":"",q[i].item_code); free(old); char *code=json_escape(q[i].item_code),*name=json_escape(q[i].item_name),*tc=json_escape(q[i].token_confirmation); old=items; items=xasprintf("%s%s{\"item_code\":\"%s\",\"product_type\":\"\",\"item_price\":%lld,\"item_name\":\"%s\",\"tax\":0,\"token_confirmation\":\"%s\"}",old,i?",":"",code,q[i].price,name,tc); free(old); free(code); free(name); free(tc); } char *ept=encrypted_empty_field(),*eauth=encrypted_empty_field(),*pf=json_escape(payment_for?payment_for:""),*access=json_escape(t->access_token),*tp=json_escape(token_payment); long long now=(long long)time(NULL),original=q[n-1].price; char *payload=xasprintf("{\"total_discount\":0,\"is_enterprise\":false,\"payment_token\":\"\",\"token_payment\":\"%s\",\"activated_autobuy_code\":\"\",\"cc_payment_type\":\"\",\"is_myxl_wallet\":false,\"pin\":\"\",\"ewallet_promo_id\":\"\",\"members\":[],\"total_fee\":0,\"fingerprint\":\"\",\"autobuy_threshold_setting\":{\"label\":\"\",\"type\":\"\",\"value\":0},\"is_use_point\":false,\"lang\":\"en\",\"payment_method\":\"BALANCE\",\"timestamp\":%lld,\"points_gained\":0,\"can_trigger_rating\":false,\"akrab_members\":[],\"akrab_parent_alias\":\"\",\"referral_unique_code\":\"\",\"coupon\":\"\",\"payment_for\":\"%s\",\"with_upsell\":false,\"topup_number\":\"\",\"stage_token\":\"\",\"authentication_id\":\"\",\"encrypted_payment_token\":\"%s\",\"token\":\"\",\"token_confirmation\":\"\",\"access_token\":\"%s\",\"wallet_number\":\"\",\"encrypted_authentication_id\":\"%s\",\"additional_data\":{\"original_price\":%lld,\"is_spend_limit_temporary\":false,\"migration_type\":\"\",\"akrab_m2m_group_id\":\"false\",\"spend_limit_amount\":0,\"is_spend_limit\":false,\"mission_id\":\"\",\"tax\":0,\"quota_bonus\":0,\"cashtag\":\"\",\"is_family_plan\":false,\"combo_details\":[],\"is_switch_plan\":false,\"discount_recurring\":0,\"is_akrab_m2m\":false,\"balance_type\":\"PREPAID_BALANCE\",\"has_bonus\":false,\"discount_promo\":0},\"total_amount\":%lld,\"is_using_autobuy\":false,\"items\":[%s]}",tp,now,pf,ept,access,eauth,original,total,items); mutation_prepare(acc); char *resp=api_request_payment("payments/api/v8/settlement-multipayment",payload,t,targets,token_payment,payment_for,payment_ts); mutation_result(acc,t,resp); free(status); free(token_payment); free(methods); free(targets); free(items); free(ept); free(eauth); free(pf); free(access); free(tp); free(payload); return resp; }
@@ -321,19 +356,151 @@ static long long payment_bizz_amount(const char *resp){
 	return ok?value:-1;
 }
 static void subscription_upper(Account *acc,char *b,size_t sz){ snprintf(b,sz,"%s",acc&&acc->subscription_type?acc->subscription_type:""); for(size_t i=0;b[i];i++) b[i]=(char)toupper((unsigned char)b[i]); }
-static int subscription_priohybrid(Account *acc){ char b[128]; subscription_upper(acc,b,sizeof(b)); return strstr(b,"PRIOHYBRID")||strstr(b,"PRIOH"); }
-static int subscription_prio(Account *acc){ char b[128]; subscription_upper(acc,b,sizeof(b)); return strstr(b,"PRIO")||!strcmp(b,"GO"); }
-static const char *decoy_balance_custom(Account *acc){ if(subscription_priohybrid(acc)&&cfg.decoy_priohybrid_option_code[0]) return cfg.decoy_priohybrid_option_code; if(subscription_prio(acc)&&cfg.decoy_prioritas_option_code[0]) return cfg.decoy_prioritas_option_code; if(!subscription_prio(acc)&&cfg.decoy_prepaid_option_code[0]) return cfg.decoy_prepaid_option_code; return cfg.decoy_balance_option_code[0]?cfg.decoy_balance_option_code:NULL; }
+static int subscription_priohybrid(Account *acc){ char b[128]; subscription_upper(acc,b,sizeof(b)); return !strcmp(b,"PRIOHYBRID"); }
+static int subscription_prio(Account *acc){ char b[128]; subscription_upper(acc,b,sizeof(b)); return !strcmp(b,"PRIORITAS")||!strcmp(b,"PRIOHYBRID")||!strcmp(b,"GO"); }
 static char *payment_items_json(PaymentQuote *q,int n,char **targets_out){ char *targets=xstrdup(""),*items=xstrdup(""); for(int i=0;i<n;i++){ char *old=targets; targets=xasprintf("%s%s%s",old,i?";":"",q[i].item_code); free(old); char *code=json_escape(q[i].item_code),*name=json_escape(q[i].item_name),*tc=json_escape(q[i].token_confirmation); old=items; items=xasprintf("%s%s{\"item_code\":\"%s\",\"product_type\":\"\",\"item_price\":%lld,\"item_name\":\"%s\",\"tax\":0,\"token_confirmation\":\"%s\"}",old,i?",":"",code,q[i].price,name,tc); free(old); free(code); free(name); free(tc); } *targets_out=targets; return items; }
-static char *find_family_option_code(Tokens *t,const char *family_code,const char *variant_code,int order,const char *enterprise_arg,char **err){ char *shop=get_store_family_packages(t,family_code,enterprise_arg),*data=json_object_dup(shop,"data"); if(!data) data=xstrdup(shop); const char *vs,*ve; if(json_array_span(data,"package_variants",&vs,&ve)){ if(err) *err=xasprintf("family lookup failed: %s",shop); free(data); free(shop); return NULL; } char *found=NULL; const char *p=vs; while(p<ve&&!found){ char *variant=next_object(&p,ve); if(!variant) break; char *vc=json_get_string(variant,"package_variant_code"); if(vc&&!strcmp(vc,variant_code)){ const char *os,*oe; if(!json_array_span(variant,"package_options",&os,&oe)){ const char *op=os; while(op<oe&&!found){ char *option=next_object(&op,oe); if(!option) break; if(json_get_ll_any(option,"order",-1)==order) found=json_get_string(option,"package_option_code"); free(option); } } } free(vc); free(variant); } if(found&&!*found){ free(found); found=NULL; } if(!found&&err) *err=xasprintf("family option not found: %s",shop); free(data); free(shop); return found; }
-static char *decoy_option_code(Tokens *t,Account *acc,const char *kind,char **err){ int prio=subscription_prio(acc); const char *custom=!strcmp(kind,"balance")?decoy_balance_custom(acc):NULL; if(custom&&*custom) return xstrdup(custom); if(!strcmp(kind,"balance")) return prio?find_family_option_code(t,"2512b72a-a3cd-4c70-a736-132cf2c1f0c0","cff298bd-8ec8-4696-b689-12407d36be15",1,"",err):find_family_option_code(t,"b0a20d74-0c54-4e3b-8f3f-01e7482e50bf","719d093f-6f8d-46a4-8390-6a0003a172ea",1,"true",err); if(err) *err=xasprintf("unknown decoy kind: %s",kind); return NULL; }
+static char *find_family_option_code_context(Tokens *t,const char *family_code,const char *variant_code,int order,const char *enterprise_arg,const char *migration_arg,char **err){ char *shop=get_store_family_packages_context(t,family_code,enterprise_arg,migration_arg),*data=json_object_dup(shop,"data"); if(!data) data=xstrdup(shop); const char *vs,*ve; if(json_array_span(data,"package_variants",&vs,&ve)){ if(err) *err=xasprintf("family lookup failed: %s",shop); free(data); free(shop); return NULL; } char *found=NULL; const char *p=vs; while(p<ve&&!found){ char *variant=next_object(&p,ve); if(!variant) break; char *vc=json_get_string(variant,"package_variant_code"); if(vc&&!strcmp(vc,variant_code)){ const char *os,*oe; if(!json_array_span(variant,"package_options",&os,&oe)){ const char *op=os; while(op<oe&&!found){ char *option=next_object(&op,oe); if(!option) break; if(json_get_ll_any(option,"order",-1)==order) found=json_get_string(option,"package_option_code"); free(option); } } } free(vc); free(variant); } if(found&&!*found){ free(found); found=NULL; } if(!found&&err) *err=xasprintf("family option not found: %s",shop); free(data); free(shop); return found; }
+static char *find_family_option_code(Tokens *t,const char *family_code,const char *variant_code,int order,const char *enterprise_arg,char **err){ return find_family_option_code_context(t,family_code,variant_code,order,enterprise_arg,NULL,err); }
+static int decoy_family_code_valid(const char *s){
+	if(!s) return 0;
+	size_t n=strlen(s);
+	if(n<1||n>128) return 0;
+	for(size_t i=0;i<n;i++) if(isspace((unsigned char)s[i])||iscntrl((unsigned char)s[i])) return 0;
+	return 1;
+}
+static int decoy_package_number_parse(const char *s,int *out){
+	if(!s||!*s) return -1;
+	errno=0; char *end=NULL; long value=strtol(s,&end,10);
+	if(errno||end==s||*end||value<1||value>INT_MAX) return -1;
+	*out=(int)value;
+	return 0;
+}
+static int decoy_pair_choice(const char *category,const char *family,const char *number,int fallback,DecoyConfigChoice *choice,char **err){
+	int has_family=family&&*family,has_number=number&&*number;
+	if(has_family!=has_number){
+		if(err) *err=xasprintf("konfigurasi decoy %s tidak lengkap: Family Code dan Nomor Paket harus sama-sama diisi atau dikosongkan",category);
+		return -1;
+	}
+	memset(choice,0,sizeof(*choice));
+	choice->category=category;
+	choice->prioritas_fallback=fallback;
+	if(!has_family) return 0;
+	if(!decoy_family_code_valid(family)){
+		if(err) *err=xasprintf("konfigurasi decoy %s tidak valid: Family Code harus 1-128 karakter tanpa spasi",category);
+		return -1;
+	}
+	if(decoy_package_number_parse(number,&choice->package_number)){
+		if(err) *err=xasprintf("konfigurasi decoy %s tidak valid: Nomor Paket harus bilangan bulat >= 1",category);
+		return -1;
+	}
+	choice->family_code=family;
+	choice->configured=1;
+	return 1;
+}
+static int decoy_config_choice(Account *acc,DecoyConfigChoice *choice,char **err){
+	if(err) *err=NULL;
+	if(subscription_priohybrid(acc)){
+		int result=decoy_pair_choice("PRIOHYBRID",cfg.decoy_priohybrid_family_code,cfg.decoy_priohybrid_package_number,0,choice,err);
+		if(result) return result;
+		return decoy_pair_choice("PRIORITAS",cfg.decoy_prioritas_family_code,cfg.decoy_prioritas_package_number,1,choice,err);
+	}
+	if(subscription_prio(acc)) return decoy_pair_choice("PRIORITAS",cfg.decoy_prioritas_family_code,cfg.decoy_prioritas_package_number,0,choice,err);
+	return decoy_pair_choice("PREPAID",cfg.decoy_prepaid_family_code,cfg.decoy_prepaid_package_number,0,choice,err);
+}
+static char *flattened_family_option_code(const char *shop,int package_number,int *total_out,char **err){
+	char *data=json_object_dup(shop,"data"); if(!data) data=xstrdup(shop);
+	const char *vs,*ve;
+	if(json_array_span(data,"package_variants",&vs,&ve)){
+		if(err) *err=xasprintf("family lookup failed: %s",shop);
+		free(data);
+		return NULL;
+	}
+	char *found=NULL; int index=0;
+	const char *vp=vs;
+	while(vp<ve){
+		char *variant=next_object(&vp,ve); if(!variant) break;
+		const char *os,*oe;
+		if(!json_array_span(variant,"package_options",&os,&oe)){
+			const char *op=os;
+			while(op<oe){
+				char *option=next_object(&op,oe); if(!option) break;
+				index++;
+				if(index==package_number){
+					found=json_get_string(option,"package_option_code");
+					if(found&&!*found){ free(found); found=NULL; }
+				}
+				free(option);
+			}
+		}
+		free(variant);
+	}
+	if(total_out) *total_out=index;
+	if(!found&&err) *err=xasprintf("Nomor Paket %d tidak tersedia; family hanya memiliki %d package option",package_number,index);
+	free(data);
+	return found;
+}
+static char *decoy_option_code_once(Tokens *t,Account *acc,char **err){
+	DecoyConfigChoice choice;
+	int configured=decoy_config_choice(acc,&choice,err);
+	if(configured<0) return NULL;
+	if(configured){
+		char *shop=get_store_family_packages(t,choice.family_code,"");
+		int total=0; char *code=flattened_family_option_code(shop,choice.package_number,&total,err);
+		if(!code&&err&&*err){
+			char *detail=*err;
+			*err=xasprintf("resolver decoy %s gagal untuk family %s: %s",choice.category,choice.family_code,detail);
+			free(detail);
+		}
+		free(shop);
+		return code;
+	}
+	if(subscription_prio(acc)) return find_family_option_code(t,"2512b72a-a3cd-4c70-a736-132cf2c1f0c0","cff298bd-8ec8-4696-b689-12407d36be15",1,"",err);
+	return find_family_option_code_context(t,"b0a20d74-0c54-4e3b-8f3f-01e7482e50bf","719d093f-6f8d-46a4-8390-6a0003a172ea",1,"true","NONE",err);
+}
+static int api_error_151(const char *response){
+	if(!response) return 0;
+	char *code=json_get_string(response,"code");
+	int matched=(code&&!strcmp(code,"151"))||json_get_ll_any(response,"code",-1)==151;
+	free(code);
+	return matched;
+}
 static char *payment_qris_settle_many_ex(Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,int token_idx,const char *payment_for_override){ if(n<1) return xstrdup("{\"status\":\"FAILED\",\"message\":\"empty cart\"}"); int ti=payment_token_index(n,token_idx); const char *payment_for=(payment_for_override&&*payment_for_override)?payment_for_override:q[0].payment_for; char *intercept=intercept_page_api(t,q[0].item_code); free(intercept); char *methods=payment_methods_api(t,&q[ti]); if(api_auth_failed(methods)) mutation_result(acc,t,methods); char *status=json_get_string(methods,"status"),*token_payment=json_get_string(methods,"token_payment"); long long payment_ts=json_get_ll_any(methods,"timestamp",-1); if(!status||strcmp(status,"SUCCESS")||!token_payment||payment_ts<0){ char *err=xasprintf("{\"status\":\"FAILED\",\"message\":\"payment methods failed\",\"response\":%s}",methods?methods:"null"); free(status); free(token_payment); free(methods); return err; } char *targets=NULL,*items=payment_items_json(q,n,&targets),*pf=json_escape(payment_for?payment_for:""),*access=json_escape(t->access_token),*tp=json_escape(token_payment); long long now=(long long)time(NULL),original=q[0].price; char *payload=xasprintf("{\"akrab\":{\"akrab_members\":[],\"akrab_parent_alias\":\"\",\"members\":[]},\"can_trigger_rating\":false,\"total_discount\":0,\"coupon\":\"\",\"payment_for\":\"%s\",\"topup_number\":\"\",\"stage_token\":\"\",\"is_enterprise\":false,\"autobuy\":{\"is_using_autobuy\":false,\"activated_autobuy_code\":\"\",\"autobuy_threshold_setting\":{\"label\":\"\",\"type\":\"\",\"value\":0}},\"access_token\":\"%s\",\"is_myxl_wallet\":false,\"additional_data\":{\"original_price\":%lld,\"is_spend_limit_temporary\":false,\"migration_type\":\"\",\"spend_limit_amount\":0,\"is_spend_limit\":false,\"tax\":0,\"benefit_type\":\"\",\"quota_bonus\":0,\"cashtag\":\"\",\"is_family_plan\":false,\"combo_details\":[],\"is_switch_plan\":false,\"discount_recurring\":0,\"has_bonus\":false,\"discount_promo\":0},\"total_amount\":%lld,\"total_fee\":0,\"is_use_point\":false,\"lang\":\"en\",\"items\":[%s],\"verification_token\":\"%s\",\"payment_method\":\"QRIS\",\"timestamp\":%lld}",pf,access,original,total,items,tp,now); mutation_prepare(acc); char *resp=api_request_payment_method("payments/api/v8/settlement-multipayment/qris",payload,t,targets,token_payment,"QRIS",payment_for,payment_ts); mutation_result(acc,t,resp); free(status); free(token_payment); free(methods); free(targets); free(items); free(pf); free(access); free(tp); free(payload); return resp; }
 static char *payment_ewallet_settle_many(Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,const char *method,const char *wallet){ if(n<1) return xstrdup("{\"status\":\"FAILED\",\"message\":\"empty cart\"}"); char *intercept=intercept_page_api(t,q[0].item_code); free(intercept); char *methods=payment_methods_api(t,&q[0]); if(api_auth_failed(methods)) mutation_result(acc,t,methods); char *status=json_get_string(methods,"status"),*token_payment=json_get_string(methods,"token_payment"); long long payment_ts=json_get_ll_any(methods,"timestamp",-1); if(!status||strcmp(status,"SUCCESS")||!token_payment||payment_ts<0){ char *err=xasprintf("{\"status\":\"FAILED\",\"message\":\"payment methods failed\",\"response\":%s}",methods?methods:"null"); free(status); free(token_payment); free(methods); return err; } char *targets=NULL,*items=payment_items_json(q,n,&targets),*pf=json_escape(q[0].payment_for),*access=json_escape(t->access_token),*tp=json_escape(token_payment),*pm=json_escape(method),*wn=json_escape(wallet?wallet:""); long long now=(long long)time(NULL); char *payload=xasprintf("{\"akrab\":{\"akrab_members\":[],\"akrab_parent_alias\":\"\",\"members\":[]},\"can_trigger_rating\":false,\"total_discount\":0,\"coupon\":\"\",\"payment_for\":\"%s\",\"topup_number\":\"\",\"is_enterprise\":false,\"autobuy\":{\"is_using_autobuy\":false,\"activated_autobuy_code\":\"\",\"autobuy_threshold_setting\":{\"label\":\"\",\"type\":\"\",\"value\":0}},\"cc_payment_type\":\"\",\"access_token\":\"%s\",\"is_myxl_wallet\":false,\"wallet_number\":\"%s\",\"additional_data\":{},\"total_amount\":%lld,\"total_fee\":0,\"is_use_point\":false,\"lang\":\"en\",\"items\":[%s],\"verification_token\":\"%s\",\"payment_method\":\"%s\",\"timestamp\":%lld}",pf,access,wn,total,items,tp,pm,now); mutation_prepare(acc); char *resp=api_request_payment_method("payments/api/v8/settlement-multipayment/ewallet",payload,t,targets,token_payment,method,q[0].payment_for,payment_ts); mutation_result(acc,t,resp); free(status); free(token_payment); free(methods); free(targets); free(items); free(pf); free(access); free(tp); free(pm); free(wn); free(payload); return resp; }
 static char *payment_voucher_settle(Account *acc,Tokens *t,PaymentQuote *q){ if(q->timestamp<0) return xstrdup("{\"status\":\"FAILED\",\"message\":\"missing package timestamp\"}"); char *ept=encrypted_empty_field(),*eauth=encrypted_empty_field(),*access=json_escape(t->access_token),*code=json_escape(q->item_code),*name=json_escape(q->item_name),*tc=json_escape(q->token_confirmation); char *payload=xasprintf("{\"total_discount\":0,\"is_enterprise\":false,\"payment_token\":\"\",\"token_payment\":\"\",\"activated_autobuy_code\":\"\",\"cc_payment_type\":\"\",\"is_myxl_wallet\":false,\"pin\":\"\",\"ewallet_promo_id\":\"\",\"members\":[],\"total_fee\":0,\"fingerprint\":\"\",\"autobuy_threshold_setting\":{\"label\":\"\",\"type\":\"\",\"value\":0},\"is_use_point\":false,\"lang\":\"en\",\"payment_method\":\"BALANCE\",\"timestamp\":%lld,\"points_gained\":0,\"can_trigger_rating\":false,\"akrab_members\":[],\"akrab_parent_alias\":\"\",\"referral_unique_code\":\"\",\"coupon\":\"\",\"payment_for\":\"REDEEM_VOUCHER\",\"with_upsell\":false,\"topup_number\":\"\",\"stage_token\":\"\",\"authentication_id\":\"\",\"encrypted_payment_token\":\"%s\",\"token\":\"\",\"token_confirmation\":\"%s\",\"access_token\":\"%s\",\"wallet_number\":\"\",\"encrypted_authentication_id\":\"%s\",\"additional_data\":{\"original_price\":0,\"is_spend_limit_temporary\":false,\"migration_type\":\"\",\"akrab_m2m_group_id\":\"\",\"spend_limit_amount\":0,\"is_spend_limit\":false,\"mission_id\":\"\",\"tax\":0,\"benefit_type\":\"\",\"quota_bonus\":0,\"cashtag\":\"\",\"is_family_plan\":false,\"combo_details\":[],\"is_switch_plan\":false,\"discount_recurring\":0,\"is_akrab_m2m\":false,\"balance_type\":\"\",\"has_bonus\":false,\"discount_promo\":0},\"total_amount\":0,\"is_using_autobuy\":false,\"items\":[{\"item_code\":\"%s\",\"product_type\":\"\",\"item_price\":%lld,\"item_name\":\"%s\",\"tax\":0}]}",q->timestamp,ept,tc,access,eauth,code,q->price,name); char *sig=make_x_signature_bounty(t->access_token,q->timestamp,q->item_code,q->token_confirmation),*resp; mutation_prepare(acc); resp=api_request_custom_sig("api/v8/personalization/bounties-exchange",payload,t,sig); mutation_result(acc,t,resp); free(ept); free(eauth); free(access); free(code); free(name); free(tc); free(payload); return resp; }
 static char *payment_point_settle(Account *acc,Tokens *t,PaymentQuote *q){ if(q->timestamp<0) return xstrdup("{\"status\":\"FAILED\",\"message\":\"missing package timestamp\"}"); const char *path="gamification/api/v8/loyalties/tiering/exchange"; char *code=json_escape(q->item_code),*tc=json_escape(q->token_confirmation); char *payload=xasprintf("{\"item_code\":\"%s\",\"amount\":0,\"partner\":\"\",\"is_enterprise\":false,\"item_name\":\"\",\"lang\":\"en\",\"points\":%lld,\"timestamp\":%lld,\"token_confirmation\":\"%s\"}",code,q->price,q->timestamp,tc); char *sig=make_x_signature_loyalty(q->timestamp,q->item_code,q->token_confirmation,path),*resp; mutation_prepare(acc); resp=api_request_custom_sig(path,payload,t,sig); mutation_result(acc,t,resp); free(code); free(tc); free(payload); return resp; }
 static char *payment_gift_settle(Account *acc,Tokens *t,PaymentQuote *q,const char *dest){ if(q->timestamp<0) return xstrdup("{\"status\":\"FAILED\",\"message\":\"missing package timestamp\"}"); const char *path="gamification/api/v8/loyalties/tiering/bounties-allotment"; char *d=json_escape(dest),*code=json_escape(q->item_code),*name=json_escape(q->item_name),*tc=json_escape(q->token_confirmation); long long now=(long long)time(NULL); char *payload=xasprintf("{\"destination_msisdn\":\"%s\",\"item_code\":\"%s\",\"is_enterprise\":false,\"item_name\":\"%s\",\"lang\":\"en\",\"timestamp\":%lld,\"token_confirmation\":\"%s\"}",d,code,name,now,tc); char *sig=make_x_signature_bounty_allotment(q->timestamp,q->item_code,q->token_confirmation,path,dest),*resp; mutation_prepare(acc); resp=api_request_custom_sig(path,payload,t,sig); mutation_result(acc,t,resp); free(d); free(code); free(name); free(tc); free(payload); return resp; }
 
-static int load_env_file(const char *path) { FILE *f = fopen(path, "r"); if (!f) return -1; char line[2048]; while (fgets(line, sizeof(line), f)) { trim(line); if (!*line || *line == '#') continue; char *eq = strchr(line, '='); if (!eq) continue; *eq++ = 0; trim(line); trim(eq); size_t l = strlen(eq); if (l >= 2 && ((*eq == '"' && eq[l-1] == '"') || (*eq == '\'' && eq[l-1] == '\''))) { eq[l-1] = 0; eq++; } char *dst = NULL; size_t sz = 0; if (!strcmp(line,"BASE_API_URL")) dst=cfg.base_api_url,sz=sizeof(cfg.base_api_url); else if (!strcmp(line,"BASE_CIAM_URL")) dst=cfg.base_ciam_url,sz=sizeof(cfg.base_ciam_url); else if (!strcmp(line,"BASIC_AUTH")) dst=cfg.basic_auth,sz=sizeof(cfg.basic_auth); else if (!strcmp(line,"AX_FP_KEY")) dst=cfg.ax_fp_key,sz=sizeof(cfg.ax_fp_key); else if (!strcmp(line,"UA")) dst=cfg.ua,sz=sizeof(cfg.ua); else if (!strcmp(line,"API_KEY")) dst=cfg.api_key,sz=sizeof(cfg.api_key); else if (!strcmp(line,"ENCRYPTED_FIELD_KEY")) dst=cfg.encrypted_field_key,sz=sizeof(cfg.encrypted_field_key); else if (!strcmp(line,"XDATA_KEY")) dst=cfg.xdata_key,sz=sizeof(cfg.xdata_key); else if (!strcmp(line,"AX_API_SIG_KEY")) dst=cfg.ax_api_sig_key,sz=sizeof(cfg.ax_api_sig_key); else if (!strcmp(line,"X_API_BASE_SECRET")) dst=cfg.x_api_base_secret,sz=sizeof(cfg.x_api_base_secret); else if (!strcmp(line,"DECOY_PREPAID_OPTION_CODE")) dst=cfg.decoy_prepaid_option_code,sz=sizeof(cfg.decoy_prepaid_option_code); else if (!strcmp(line,"DECOY_PRIORITAS_OPTION_CODE")) dst=cfg.decoy_prioritas_option_code,sz=sizeof(cfg.decoy_prioritas_option_code); else if (!strcmp(line,"DECOY_PRIOHYBRID_OPTION_CODE")) dst=cfg.decoy_priohybrid_option_code,sz=sizeof(cfg.decoy_priohybrid_option_code); else if (!strcmp(line,"DECOY_BALANCE_OPTION_CODE")) dst=cfg.decoy_balance_option_code,sz=sizeof(cfg.decoy_balance_option_code); if (dst) snprintf(dst, sz, "%s", eq); } fclose(f); return 0; }
+static int load_env_file(const char *path) {
+	FILE *f=fopen(path,"r"); if(!f) return -1;
+	char line[2048];
+	while(fgets(line,sizeof(line),f)){
+		trim(line); if(!*line||*line=='#') continue;
+		char *eq=strchr(line,'='); if(!eq) continue;
+		*eq++=0; trim(line); trim(eq);
+		size_t len=strlen(eq);
+		if(len>=2&&((*eq=='"'&&eq[len-1]=='"')||(*eq=='\''&&eq[len-1]=='\''))){ eq[len-1]=0; eq++; }
+		char *dst=NULL; size_t size=0;
+		if(!strcmp(line,"BASE_API_URL")) dst=cfg.base_api_url,size=sizeof(cfg.base_api_url);
+		else if(!strcmp(line,"BASE_CIAM_URL")) dst=cfg.base_ciam_url,size=sizeof(cfg.base_ciam_url);
+		else if(!strcmp(line,"BASIC_AUTH")) dst=cfg.basic_auth,size=sizeof(cfg.basic_auth);
+		else if(!strcmp(line,"AX_FP_KEY")) dst=cfg.ax_fp_key,size=sizeof(cfg.ax_fp_key);
+		else if(!strcmp(line,"UA")) dst=cfg.ua,size=sizeof(cfg.ua);
+		else if(!strcmp(line,"API_KEY")) dst=cfg.api_key,size=sizeof(cfg.api_key);
+		else if(!strcmp(line,"ENCRYPTED_FIELD_KEY")) dst=cfg.encrypted_field_key,size=sizeof(cfg.encrypted_field_key);
+		else if(!strcmp(line,"XDATA_KEY")) dst=cfg.xdata_key,size=sizeof(cfg.xdata_key);
+		else if(!strcmp(line,"AX_API_SIG_KEY")) dst=cfg.ax_api_sig_key,size=sizeof(cfg.ax_api_sig_key);
+		else if(!strcmp(line,"X_API_BASE_SECRET")) dst=cfg.x_api_base_secret,size=sizeof(cfg.x_api_base_secret);
+		else if(!strcmp(line,"DECOY_PREPAID_FAMILY_CODE")) dst=cfg.decoy_prepaid_family_code,size=sizeof(cfg.decoy_prepaid_family_code);
+		else if(!strcmp(line,"DECOY_PREPAID_PACKAGE_NUMBER")) dst=cfg.decoy_prepaid_package_number,size=sizeof(cfg.decoy_prepaid_package_number);
+		else if(!strcmp(line,"DECOY_PRIORITAS_FAMILY_CODE")) dst=cfg.decoy_prioritas_family_code,size=sizeof(cfg.decoy_prioritas_family_code);
+		else if(!strcmp(line,"DECOY_PRIORITAS_PACKAGE_NUMBER")) dst=cfg.decoy_prioritas_package_number,size=sizeof(cfg.decoy_prioritas_package_number);
+		else if(!strcmp(line,"DECOY_PRIOHYBRID_FAMILY_CODE")) dst=cfg.decoy_priohybrid_family_code,size=sizeof(cfg.decoy_priohybrid_family_code);
+		else if(!strcmp(line,"DECOY_PRIOHYBRID_PACKAGE_NUMBER")) dst=cfg.decoy_priohybrid_package_number,size=sizeof(cfg.decoy_priohybrid_package_number);
+		if(dst) snprintf(dst,size,"%s",eq);
+	}
+	fclose(f);
+	return 0;
+}
 static const char *config_missing(void){ const char *names[]={"BASE_API_URL","BASE_CIAM_URL","BASIC_AUTH","AX_FP_KEY","UA","API_KEY","XDATA_KEY","AX_API_SIG_KEY","X_API_BASE_SECRET"}; const char *vals[]={cfg.base_api_url,cfg.base_ciam_url,cfg.basic_auth,cfg.ax_fp_key,cfg.ua,cfg.api_key,cfg.xdata_key,cfg.ax_api_sig_key,cfg.x_api_base_secret}; for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++) if(!vals[i][0]) return names[i]; return NULL; }
 static void load_config(void) { const char *home=getenv("ENGSEL_HOME"),*user_home=getenv("HOME"); if(home&&*home) snprintf(cfg.home,sizeof(cfg.home),"%s",home); else if(user_home&&*user_home) snprintf(cfg.home,sizeof(cfg.home),"%s/.engsel",user_home); else snprintf(cfg.home,sizeof(cfg.home),"/root/.engsel"); const char *env=getenv("ENGSEL_ENV"); if(env){ if(!load_env_file(env)) snprintf(cfg.env_path,sizeof(cfg.env_path),"%s",env); } else if(!load_env_file("/etc/engsel/.env")) snprintf(cfg.env_path,sizeof(cfg.env_path),"/etc/engsel/.env"); else if(!load_env_file("/etc/engsel.env")) snprintf(cfg.env_path,sizeof(cfg.env_path),"/etc/engsel.env"); else if(!load_env_file(".env")) snprintf(cfg.env_path,sizeof(cfg.env_path),".env"); ensure_dir(cfg.home); }
 static void require_config(void){ const char *missing=config_missing(); if(missing) die("missing env %s in /etc/engsel/.env or /etc/engsel.env",missing); }
@@ -373,13 +540,37 @@ static void delete_account_number(const char *number){ Accounts a=accounts_load(
 static void cmd_del(const char *number){ delete_account_number(number); printf("deleted: %s\n",number); }
 static void cmd_logout(void){ Accounts a=accounts_load(); char *act=active_get(); Account *acc=(act&&*act)?accounts_find(&a,act):NULL; if(acc){ token_cache_delete(acc); response_cache_invalidate_account(acc); } active_set(""); printf("session reset%s%s\n",act&&*act?": ":"",act&&*act?act:""); free(act); accounts_free(&a); }
 static void cmd_quota(const char *number_arg){ Accounts a=accounts_load(); char *act=NULL; const char *number=number_arg; if(!number){ act=active_get(); number=act; } if(!number||!*number) die("no active account. run: engsel use <number>"); Account *acc=accounts_find(&a,number); if(!acc) die("account not found: %s",number); Tokens t={0}; if(refresh_account(acc,&t)) exit(1); account_sync(&a,acc,&t); char *q=get_quota(&t); QuotaList ql={0}; show_quota_pretty(q,acc->number,acc->subscription_type,&ql); ql_free(&ql); free(q); tokens_free(&t); accounts_free(&a); free(act); }
-static void cmd_env(void){ printf("home: %s\n",cfg.home); printf("env: %s\n",cfg.env_path[0]?cfg.env_path:"(none)"); printf("BASE_API_URL: %s\n",cfg.base_api_url[0]?"ok":"missing"); printf("BASE_CIAM_URL: %s\n",cfg.base_ciam_url[0]?"ok":"missing"); printf("BASIC_AUTH: %s\n",cfg.basic_auth[0]?"ok":"missing"); printf("AX_FP_KEY: %s\n",cfg.ax_fp_key[0]?"ok":"missing"); printf("UA: %s\n",cfg.ua[0]?"ok":"missing"); printf("API_KEY: %s\n",cfg.api_key[0]?"ok":"missing"); printf("ENCRYPTED_FIELD_KEY: %s\n",cfg.encrypted_field_key[0]?"ok":"missing"); printf("XDATA_KEY: %s\n",cfg.xdata_key[0]?"ok":"missing"); printf("AX_API_SIG_KEY: %s\n",cfg.ax_api_sig_key[0]?"ok":"missing"); printf("X_API_BASE_SECRET: %s\n",cfg.x_api_base_secret[0]?"ok":"missing"); printf("DECOY_PREPAID_OPTION_CODE: %s\n",cfg.decoy_prepaid_option_code[0]?"set":"default"); printf("DECOY_PRIORITAS_OPTION_CODE: %s\n",cfg.decoy_prioritas_option_code[0]?"set":"default"); printf("DECOY_PRIOHYBRID_OPTION_CODE: %s\n",cfg.decoy_priohybrid_option_code[0]?"set":"default"); printf("DECOY_BALANCE_OPTION_CODE: %s\n",cfg.decoy_balance_option_code[0]?"set":"default"); printf("libmbedcrypto: linked\n"); }
+static void cmd_env(void){
+	int number=0;
+	printf("home: %s\n",cfg.home); printf("env: %s\n",cfg.env_path[0]?cfg.env_path:"(none)");
+	printf("BASE_API_URL: %s\n",cfg.base_api_url[0]?"ok":"missing"); printf("BASE_CIAM_URL: %s\n",cfg.base_ciam_url[0]?"ok":"missing");
+	printf("BASIC_AUTH: %s\n",cfg.basic_auth[0]?"ok":"missing"); printf("AX_FP_KEY: %s\n",cfg.ax_fp_key[0]?"ok":"missing");
+	printf("UA: %s\n",cfg.ua[0]?"ok":"missing"); printf("API_KEY: %s\n",cfg.api_key[0]?"ok":"missing");
+	printf("ENCRYPTED_FIELD_KEY: %s\n",cfg.encrypted_field_key[0]?"ok":"missing"); printf("XDATA_KEY: %s\n",cfg.xdata_key[0]?"ok":"missing");
+	printf("AX_API_SIG_KEY: %s\n",cfg.ax_api_sig_key[0]?"ok":"missing"); printf("X_API_BASE_SECRET: %s\n",cfg.x_api_base_secret[0]?"ok":"missing");
+	printf("DECOY_PREPAID_FAMILY_CODE: %s\n",cfg.decoy_prepaid_family_code[0]?"set":"default");
+	printf("DECOY_PREPAID_PACKAGE_NUMBER: %s\n",!decoy_package_number_parse(cfg.decoy_prepaid_package_number,&number)?"set":(cfg.decoy_prepaid_package_number[0]?"invalid":"default"));
+	printf("DECOY_PRIORITAS_FAMILY_CODE: %s\n",cfg.decoy_prioritas_family_code[0]?"set":"default");
+	printf("DECOY_PRIORITAS_PACKAGE_NUMBER: %s\n",!decoy_package_number_parse(cfg.decoy_prioritas_package_number,&number)?"set":(cfg.decoy_prioritas_package_number[0]?"invalid":"default"));
+	printf("DECOY_PRIOHYBRID_FAMILY_CODE: %s\n",cfg.decoy_priohybrid_family_code[0]?"set":"fallback PRIORITAS");
+	printf("DECOY_PRIOHYBRID_PACKAGE_NUMBER: %s\n",!decoy_package_number_parse(cfg.decoy_priohybrid_package_number,&number)?"set":(cfg.decoy_priohybrid_package_number[0]?"invalid":"fallback PRIORITAS"));
+	printf("libmbedcrypto: linked\n");
+}
 static void json_str(const char *s){ char *e=json_escape(s?s:""); printf("\"%s\"",e); free(e); }
 static int json_require_config(void){ const char *missing=config_missing(); if(!missing) return 0; printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return -1; }
 static int jsonish(const char *s){ return json_document_ok(s); }
 static void json_val(const char *s){ if(jsonish(s)) fputs(s,stdout); else json_str(s?s:""); }
 static void json_accounts_fields(Accounts *a,const char *act){ printf("\"active\":"); json_str(act?act:""); printf(",\"accounts\":["); for(size_t i=0;i<a->len;i++){ if(i) putchar(','); printf("{\"number\":"); json_str(a->items[i].number); printf(",\"subscription_type\":"); json_str(a->items[i].subscription_type); printf(",\"active\":%s}",(act&&strcmp(act,a->items[i].number)==0)?"true":"false"); } putchar(']'); }
-static void cmd_json_env(void){ printf("{\"ok\":true,\"home\":"); json_str(cfg.home); printf(",\"env_path\":"); json_str(cfg.env_path); printf(",\"env\":{"); printf("\"BASE_API_URL\":%s,\"BASE_CIAM_URL\":%s,\"BASIC_AUTH\":%s,\"AX_FP_KEY\":%s,\"UA\":%s,\"API_KEY\":%s,\"ENCRYPTED_FIELD_KEY\":%s,\"XDATA_KEY\":%s,\"AX_API_SIG_KEY\":%s,\"X_API_BASE_SECRET\":%s,\"DECOY_PREPAID_OPTION_CODE\":%s,\"DECOY_PRIORITAS_OPTION_CODE\":%s,\"DECOY_PRIOHYBRID_OPTION_CODE\":%s,\"DECOY_BALANCE_OPTION_CODE\":%s", cfg.base_api_url[0]?"true":"false", cfg.base_ciam_url[0]?"true":"false", cfg.basic_auth[0]?"true":"false", cfg.ax_fp_key[0]?"true":"false", cfg.ua[0]?"true":"false", cfg.api_key[0]?"true":"false", cfg.encrypted_field_key[0]?"true":"false", cfg.xdata_key[0]?"true":"false", cfg.ax_api_sig_key[0]?"true":"false", cfg.x_api_base_secret[0]?"true":"false", cfg.decoy_prepaid_option_code[0]?"true":"false", cfg.decoy_prioritas_option_code[0]?"true":"false", cfg.decoy_priohybrid_option_code[0]?"true":"false", cfg.decoy_balance_option_code[0]?"true":"false"); printf("},\"libmbedcrypto\":true}\n"); }
+static void cmd_json_env(void){
+	int prepaid_number=0,prioritas_number=0,hybrid_number=0;
+	int prepaid_valid=!decoy_package_number_parse(cfg.decoy_prepaid_package_number,&prepaid_number);
+	int prioritas_valid=!decoy_package_number_parse(cfg.decoy_prioritas_package_number,&prioritas_number);
+	int hybrid_valid=!decoy_package_number_parse(cfg.decoy_priohybrid_package_number,&hybrid_number);
+	printf("{\"ok\":true,\"home\":"); json_str(cfg.home); printf(",\"env_path\":"); json_str(cfg.env_path); printf(",\"env\":{");
+	printf("\"BASE_API_URL\":%s,\"BASE_CIAM_URL\":%s,\"BASIC_AUTH\":%s,\"AX_FP_KEY\":%s,\"UA\":%s,\"API_KEY\":%s,\"ENCRYPTED_FIELD_KEY\":%s,\"XDATA_KEY\":%s,\"AX_API_SIG_KEY\":%s,\"X_API_BASE_SECRET\":%s,\"DECOY_PREPAID_FAMILY_CODE\":%s,\"DECOY_PREPAID_PACKAGE_NUMBER\":%s,\"DECOY_PRIORITAS_FAMILY_CODE\":%s,\"DECOY_PRIORITAS_PACKAGE_NUMBER\":%s,\"DECOY_PRIOHYBRID_FAMILY_CODE\":%s,\"DECOY_PRIOHYBRID_PACKAGE_NUMBER\":%s",
+		cfg.base_api_url[0]?"true":"false",cfg.base_ciam_url[0]?"true":"false",cfg.basic_auth[0]?"true":"false",cfg.ax_fp_key[0]?"true":"false",cfg.ua[0]?"true":"false",cfg.api_key[0]?"true":"false",cfg.encrypted_field_key[0]?"true":"false",cfg.xdata_key[0]?"true":"false",cfg.ax_api_sig_key[0]?"true":"false",cfg.x_api_base_secret[0]?"true":"false",cfg.decoy_prepaid_family_code[0]?"true":"false",prepaid_valid?"true":"false",cfg.decoy_prioritas_family_code[0]?"true":"false",prioritas_valid?"true":"false",cfg.decoy_priohybrid_family_code[0]?"true":"false",hybrid_valid?"true":"false");
+	printf("},\"libmbedcrypto\":true}\n");
+}
 static void cmd_json_accounts(void){ Accounts a=accounts_load(); char *act=active_get(); printf("{\"ok\":true,"); json_accounts_fields(&a,act); printf("}\n"); free(act); accounts_free(&a); }
 static void cmd_json_use(const char *number){ Accounts a=accounts_load(); Account *acc=accounts_find(&a,number); if(!acc){ printf("{\"ok\":false,\"error\":\"account not found\"}\n"); accounts_free(&a); return; } active_set(number); printf("{\"ok\":true,\"active\":"); json_str(number); printf("}\n"); accounts_free(&a); }
 static void cmd_json_del(const char *number){ Accounts a=accounts_load(); if(!accounts_find(&a,number)){ printf("{\"ok\":false,\"error\":\"account not found\"}\n"); accounts_free(&a); return; } accounts_free(&a); delete_account_number(number); printf("{\"ok\":true}\n"); }
@@ -414,7 +605,81 @@ static int package_detail_valid(const char *detail){ char *status=json_get_strin
 static int redeemables_valid(const char *resp){ const char *s,*e; return api_success_response(resp)&&!json_array_span(resp,"categories",&s,&e); }
 static int transaction_history_valid(const char *resp){ const char *s,*e,*keys[]={"list","transaction_history","history","transactions"}; return api_success_response(resp)&&!json_array_span_any(resp,keys,4,&s,&e); }
 static int pending_payment_present(const char *resp){ const char *s,*e; if(json_array_span(resp,"pending_payment",&s,&e)) return 0; while(s<e&&isspace((unsigned char)*s)) s++; return s<e; }
-static int payment_quote_load_retry(Accounts *a,Account *acc,Tokens *t,const char *code,PaymentQuote *q,char **err){ if(!payment_quote_load(t,code,q,err)) return 0; if(err&&*err&&api_auth_failed(*err)){ free(*err); *err=NULL; if(!api_retry_auth(acc,a,t)) return payment_quote_load(t,code,q,err); } return -1; }
+static int payment_quote_load_retry_track(Accounts *a,Account *acc,Tokens *t,const char *code,PaymentQuote *q,char **err,int *token_refreshed){
+	if(token_refreshed) *token_refreshed=0;
+	if(!payment_quote_load(t,code,q,err)) return 0;
+	if(err&&*err&&api_auth_failed(*err)){
+		free(*err); *err=NULL;
+		if(!api_retry_auth(acc,a,t)){
+			if(token_refreshed) *token_refreshed=1;
+			return payment_quote_load(t,code,q,err);
+		}
+	}
+	return -1;
+}
+static int payment_quote_load_retry(Accounts *a,Account *acc,Tokens *t,const char *code,PaymentQuote *q,char **err){ return payment_quote_load_retry_track(a,acc,t,code,q,err,NULL); }
+static int decoy_quote_resolve_once(Account *acc,Tokens *t,PaymentQuote *quote,char **option_code,char **err){
+	char *code=decoy_option_code_once(t,acc,err);
+	if(!code) return -1;
+	if(payment_quote_load(t,code,quote,err)){
+		free(code);
+		return -1;
+	}
+	if(option_code) *option_code=code;
+	else free(code);
+	return 0;
+}
+static int decoy_quote_resolve(Accounts *accounts,Account *acc,Tokens *tokens,PaymentQuote *quote,char **option_code,char **err,int *token_refreshed){
+	if(err) *err=NULL;
+	if(option_code) *option_code=NULL;
+	if(token_refreshed) *token_refreshed=0;
+	if(!decoy_quote_resolve_once(acc,tokens,quote,option_code,err)) return 0;
+	int retry_151=err&&*err&&api_error_151(*err);
+	int retry_auth=err&&*err&&api_auth_failed(*err);
+	if(!retry_151&&!retry_auth) return -1;
+	char *first_error=err?*err:NULL;
+	if(err) *err=NULL;
+	payment_quote_free(quote);
+	if(option_code&&*option_code){ free(*option_code); *option_code=NULL; }
+	if(api_retry_auth(acc,accounts,tokens)){
+		if(err) *err=xasprintf("resolver decoy gagal memperbarui token akun aktif setelah %s: %s",retry_151?"error 151":"auth error",first_error?first_error:"unknown error");
+		free(first_error);
+		return -1;
+	}
+	if(token_refreshed) *token_refreshed=1;
+	free(first_error);
+	if(!decoy_quote_resolve_once(acc,tokens,quote,option_code,err)) return 0;
+	if(retry_151&&err&&*err){
+		char *retry_error=*err;
+		*err=xasprintf("resolver decoy tetap gagal setelah error 151 di-resolve ulang satu kali dengan token terbaru: %s",retry_error);
+		free(retry_error);
+	}
+	return -1;
+}
+static int payment_quotes_reload_current(Tokens *tokens,PaymentQuote *quotes,int count,long long *total,char **err){
+	char *codes[3]={0};
+	if(count<1||count>3){ if(err) *err=xstrdup("target quote count invalid"); return -1; }
+	for(int i=0;i<count;i++) codes[i]=xstrdup(quotes[i].item_code);
+	for(int i=0;i<count;i++) payment_quote_free(&quotes[i]);
+	long long sum=0; int loaded=0;
+	for(int i=0;i<count;i++){
+		if(payment_quote_load(tokens,codes[i],&quotes[i],err)){
+			for(int j=0;j<loaded;j++) payment_quote_free(&quotes[j]);
+			for(int j=0;j<count;j++) free(codes[j]);
+			return -1;
+		}
+		if(quotes[i].price>LLONG_MAX-sum){
+			if(err) *err=xstrdup("target quote total overflow");
+			for(int j=0;j<=i;j++) payment_quote_free(&quotes[j]);
+			for(int j=0;j<count;j++) free(codes[j]);
+			return -1;
+		}
+		sum+=quotes[i].price; loaded++;
+	}
+	for(int i=0;i<count;i++) free(codes[i]);
+	if(total) *total=sum;
+	return 0;
+}
 static char *payment_pulsa_settle_many_once(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,int n,long long total){ (void)a; (void)acc; return payment_pulsa_settle_many(acc,t,q,n,total); }
 static void json_auth_error(const char *resp){ printf("{\"ok\":false,\"error\":\"auth failed\",\"response\":"); json_val(resp); printf("}\n"); }
 static int load_payment_quotes_json(Accounts *a,Account *acc,Tokens *t,int n,char **codes,PaymentQuote *q,int max,long long *total,int *loaded);
@@ -434,7 +699,32 @@ static void cmd_json_payment_probe(const char *option_code){ if(!option_code||!*
 static void cmd_json_payment_pulsa(const char *option_code,const char *confirm_arg,long long custom_amount){ const char *missing=payment_config_missing(); if(missing){ printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return; } if(!option_code||!*option_code){ printf("{\"ok\":false,\"error\":\"missing package code\"}\n"); return; } Accounts a=accounts_load(); char *act=active_get(); Account *acc=(act&&*act)?accounts_find(&a,act):NULL; if(!acc){ printf("{\"ok\":false,\"error\":\"no active account\"}\n"); free(act); accounts_free(&a); return; } Tokens t={0}; if(refresh_account(acc,&t)){ printf("{\"ok\":false,\"error\":\"refresh failed\",\"number\":"); json_str(acc->number); printf("}\n"); free(act); accounts_free(&a); return; } account_sync(&a,acc,&t); PaymentQuote q={0}; char *err=NULL; if(payment_quote_load_retry(&a,acc,&t,option_code,&q,&err)){ printf("{\"ok\":false,\"error\":"); json_str(err?err:"quote failed"); printf("}\n"); free(err); tokens_free(&t); free(act); accounts_free(&a); return; } long long amount=payment_amount(q.price,custom_amount); char expect[80]; snprintf(expect,sizeof(expect),"BAYAR-%lld",amount); if(!confirm_arg||strcmp(confirm_arg,expect)){ printf("{\"ok\":false,\"error\":\"confirm required\",\"confirm\":"); json_str(expect); printf(",\"quote\":"); payment_quote_print_json(&q); print_amount_json(q.price,amount); printf("}\n"); payment_quote_free(&q); tokens_free(&t); free(act); accounts_free(&a); return; } char *resp=payment_pulsa_settle_many_once(&a,acc,&t,&q,1,amount),*status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message"); int ok=status&&!strcmp(status,"SUCCESS"); printf("{\"ok\":%s,\"payment\":\"pulsa\",\"message\":",ok?"true":"false"); json_str(msg?msg:(status?status:"unknown")); printf(",\"quote\":"); payment_quote_print_json(&q); print_amount_json(q.price,amount); printf(",\"response\":"); json_val(resp); printf("}\n"); free(status); free(msg); free(resp); payment_quote_free(&q); tokens_free(&t); free(act); accounts_free(&a); }
 static void cmd_json_payment_pulsa_cart(int n,char **codes,long long custom_amount){ const char *missing=payment_config_missing(); if(missing){ printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return; } if(require_json_payment_confirmed()) return; if(n<1){ printf("{\"ok\":false,\"error\":\"missing package code\"}\n"); return; } if(n>3){ printf("{\"ok\":false,\"error\":\"cart max 3 packages\"}\n"); return; } Accounts a=accounts_load(); char *act=active_get(); Account *acc=(act&&*act)?accounts_find(&a,act):NULL; if(!acc){ printf("{\"ok\":false,\"error\":\"no active account\"}\n"); free(act); accounts_free(&a); return; } Tokens t={0}; if(refresh_account(acc,&t)){ printf("{\"ok\":false,\"error\":\"refresh failed\",\"number\":"); json_str(acc->number); printf("}\n"); free(act); accounts_free(&a); return; } account_sync(&a,acc,&t); PaymentQuote q[3]; memset(q,0,sizeof(q)); long long total=0; int loaded=0; if(load_payment_quotes_json(&a,acc,&t,n,codes,q,3,&total,&loaded)){ tokens_free(&t); free(act); accounts_free(&a); return; } long long amount=payment_amount(total,custom_amount); char *resp=payment_pulsa_settle_many_once(&a,acc,&t,q,n,amount),*status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message"); int ok=status&&!strcmp(status,"SUCCESS"); printf("{\"ok\":%s,\"payment\":\"pulsa\",\"message\":",ok?"true":"false"); json_str(msg?msg:(status?status:"unknown")); printf(",\"quotes\":["); for(int i=0;i<n;i++){ if(i) putchar(','); payment_quote_print_json(&q[i]); } putchar(']'); print_amount_json(total,amount); printf(",\"response\":"); json_val(resp); printf("}\n"); free(status); free(msg); free(resp); for(int i=0;i<n;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); }
 static int json_payment_begin(Accounts *a,char **act,Account **acc,Tokens *t){ *a=accounts_load(); *act=active_get(); *acc=(*act&&**act)?accounts_find(a,*act):NULL; if(!*acc){ printf("{\"ok\":false,\"error\":\"no active account\"}\n"); free(*act); accounts_free(a); return -1; } if(refresh_account(*acc,t)){ printf("{\"ok\":false,\"error\":\"refresh failed\",\"number\":"); json_str((*acc)->number); printf("}\n"); free(*act); accounts_free(a); return -1; } account_sync(a,*acc,t); return 0; }
-static int load_payment_quotes_json(Accounts *a,Account *acc,Tokens *t,int n,char **codes,PaymentQuote *q,int max,long long *total,int *loaded){ if(n<1){ printf("{\"ok\":false,\"error\":\"missing package code\"}\n"); return -1; } if(n>max){ printf("{\"ok\":false,\"error\":\"cart max %d packages\"}\n",max); return -1; } *total=0; *loaded=0; for(int i=0;i<n;i++){ char *err=NULL; if(payment_quote_load_retry(a,acc,t,codes[i],&q[i],&err)){ printf("{\"ok\":false,\"error\":"); json_str(err?err:"quote failed"); printf(",\"index\":%d,\"code\":",i); json_str(codes[i]); printf("}\n"); free(err); for(int j=0;j<*loaded;j++) payment_quote_free(&q[j]); return -1; } *total+=q[i].price; (*loaded)++; } return 0; }
+static int load_payment_quotes_json(Accounts *a,Account *acc,Tokens *t,int n,char **codes,PaymentQuote *q,int max,long long *total,int *loaded){
+	if(n<1){ printf("{\"ok\":false,\"error\":\"missing package code\"}\n"); return -1; }
+	if(n>max){ printf("{\"ok\":false,\"error\":\"cart max %d packages\"}\n",max); return -1; }
+	*total=0; *loaded=0;
+	for(int i=0;i<n;i++){
+		char *err=NULL; int refreshed=0;
+		if(payment_quote_load_retry_track(a,acc,t,codes[i],&q[i],&err,&refreshed)){
+			printf("{\"ok\":false,\"error\":"); json_str(err?err:"quote failed"); printf(",\"index\":%d,\"code\":",i); json_str(codes[i]); printf("}\n");
+			free(err); for(int j=0;j<*loaded;j++) payment_quote_free(&q[j]); return -1;
+		}
+		if(refreshed&&*loaded>0){
+			long long reloaded_total=0;
+			if(payment_quotes_reload_current(t,q,*loaded,&reloaded_total,&err)){
+				printf("{\"ok\":false,\"error\":"); json_str(err?err:"prior target quote reload failed after token refresh"); printf(",\"index\":%d}\n",i);
+				free(err); payment_quote_free(&q[i]); *loaded=0; return -1;
+			}
+			*total=reloaded_total;
+		}
+		if(q[i].price>LLONG_MAX-*total){
+			printf("{\"ok\":false,\"error\":\"target quote total overflow\",\"index\":%d}\n",i);
+			payment_quote_free(&q[i]); for(int j=0;j<*loaded;j++) payment_quote_free(&q[j]); *loaded=0; return -1;
+		}
+		*total+=q[i].price; (*loaded)++;
+	}
+	return 0;
+}
 static void print_quotes_json(PaymentQuote *q,int n){ printf("\"quotes\":["); for(int i=0;i<n;i++){ if(i) putchar(','); payment_quote_print_json(&q[i]); } putchar(']'); }
 static int payment_ok_status(const char *status){ return status&&!strcmp(status,"SUCCESS"); }
 static long long payment_amount(long long total,long long custom_amount){ return custom_amount>=0?custom_amount:total; }
@@ -516,16 +806,21 @@ static void cmd_json_payment_decoy_mode(const char *mode,int standard,int n,char
 	PaymentQuote q[4]; memset(q,0,sizeof(q));
 	long long total=0; int loaded=0;
 	if(load_payment_quotes_json(&a,acc,&t,n,codes,q,3,&total,&loaded)){ tokens_free(&t); free(act); accounts_free(&a); return; }
-	char *err=NULL,*decoy=decoy_option_code(&t,acc,"balance",&err);
-	if(!decoy){
-		printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy failed"); printf("}\n");
-		free(err); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return;
-	}
-	if(payment_quote_load_retry(&a,acc,&t,decoy,&q[loaded],&err)){
-		printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy quote failed"); printf(",\"decoy_code\":"); json_str(decoy); printf("}\n");
+	char *err=NULL,*decoy=NULL; int decoy_refreshed=0;
+	if(decoy_quote_resolve(&a,acc,&t,&q[loaded],&decoy,&err,&decoy_refreshed)){
+		printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy resolve/validation failed before settlement"); printf("}\n");
 		free(err); free(decoy); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return;
 	}
-	free(decoy); total+=q[loaded].price; loaded++;
+	free(decoy);
+	if(decoy_refreshed&&payment_quotes_reload_current(&t,q,loaded,&total,&err)){
+		printf("{\"ok\":false,\"error\":"); json_str(err?err:"target quote reload failed after decoy refresh"); printf("}\n");
+		free(err); payment_quote_free(&q[loaded]); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return;
+	}
+	if(q[loaded].price>LLONG_MAX-total){
+		printf("{\"ok\":false,\"error\":\"payment amount overflow\"}\n");
+		payment_quote_free(&q[loaded]); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return;
+	}
+	total+=q[loaded].price; loaded++;
 	long long amount=payment_amount(total,custom_amount);
 	int token_idx=standard?0:loaded-1;
 	const char *payment_for_override=standard?NULL:DECOY_V2_PAYMENT_FOR;
@@ -538,7 +833,47 @@ static void cmd_json_payment_decoy_mode(const char *mode,int standard,int n,char
 	printf(",\"response\":"); json_val(resp); if(first){ printf(",\"first_response\":"); json_val(first); } printf("}\n");
 	free(first); free(status); free(msg); free(resp); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a);
 }
-static void cmd_json_payment_qris_mode(const char *mode,const char *decoy_kind,int n,char **codes,long long custom_amount){ const char *missing=payment_config_missing(); if(missing){ printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return; } if(require_json_payment_confirmed()) return; Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(json_payment_begin(&a,&act,&acc,&t)) return; PaymentQuote q[4]; memset(q,0,sizeof(q)); long long total=0; int loaded=0; if(load_payment_quotes_json(&a,acc,&t,n,codes,q,3,&total,&loaded)){ tokens_free(&t); free(act); accounts_free(&a); return; } if(decoy_kind){ char *err=NULL,*decoy=decoy_option_code(&t,acc,decoy_kind,&err); if(!decoy){ printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy failed"); printf("}\n"); free(err); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return; } if(payment_quote_load_retry(&a,acc,&t,decoy,&q[loaded],&err)){ printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy quote failed"); printf(",\"decoy_code\":"); json_str(decoy); printf("}\n"); free(err); free(decoy); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); return; } free(decoy); total+=q[loaded].price; loaded++; } long long amount=payment_amount(total,custom_amount); int token_idx=decoy_kind?loaded-1:0; const char *pf=decoy_kind?"SHARE_PACKAGE":NULL; char *resp=payment_qris_settle_many_ex(acc,&t,q,loaded,amount,token_idx,pf); char *status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message"),*tx=json_get_string(resp,"transaction_code"),*pending=NULL,*qr=NULL,*qr_url=NULL; int ok=payment_ok_status(status); if(ok&&tx&&*tx){ pending=get_transaction_status_retry(&a,acc,&t,tx,""); qr=json_get_string(pending,"qr_code"); if(qr&&*qr){ char *b64=b64_encode((unsigned char *)qr,strlen(qr),1); qr_url=xasprintf("https://ki-ar-kod.netlify.app/?data=%s",b64); free(b64); } } printf("{\"ok\":%s,\"payment\":\"qris\",\"mode\":",ok?"true":"false"); json_str(mode); printf(",\"message\":"); json_str(msg?msg:(status?status:"unknown")); printf(","); print_quotes_json(q,loaded); print_amount_json(total,amount); printf(",\"response\":"); json_val(resp); if(tx){ printf(",\"transaction_code\":"); json_str(tx); } if(pending){ printf(",\"pending_detail\":"); json_val(pending); } if(qr){ printf(",\"qris_code\":"); json_str(qr); } if(qr_url){ printf(",\"qris_url\":"); json_str(qr_url); } printf("}\n"); free(status); free(msg); free(tx); free(pending); free(qr); free(qr_url); free(resp); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); }
+static void cmd_json_payment_qris_mode(const char *mode,const char *decoy_kind,int n,char **codes,long long custom_amount){
+	const char *missing=payment_config_missing();
+	if(missing){ printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return; }
+	if(require_json_payment_confirmed()) return;
+	Accounts accounts={0}; char *active=NULL; Account *acc=NULL; Tokens tokens={0};
+	if(json_payment_begin(&accounts,&active,&acc,&tokens)) return;
+	PaymentQuote quotes[4]; memset(quotes,0,sizeof(quotes));
+	long long total=0; int loaded=0;
+	if(load_payment_quotes_json(&accounts,acc,&tokens,n,codes,quotes,3,&total,&loaded)){ tokens_free(&tokens); free(active); accounts_free(&accounts); return; }
+	if(decoy_kind){
+		char *err=NULL,*decoy=NULL; int refreshed=0;
+		if(decoy_quote_resolve(&accounts,acc,&tokens,&quotes[loaded],&decoy,&err,&refreshed)){
+			printf("{\"ok\":false,\"error\":"); json_str(err?err:"decoy resolve/validation failed before settlement"); printf("}\n");
+			free(err); free(decoy); for(int i=0;i<loaded;i++) payment_quote_free(&quotes[i]); tokens_free(&tokens); free(active); accounts_free(&accounts); return;
+		}
+		free(decoy);
+		if(refreshed&&payment_quotes_reload_current(&tokens,quotes,loaded,&total,&err)){
+			printf("{\"ok\":false,\"error\":"); json_str(err?err:"target quote reload failed after decoy refresh"); printf("}\n");
+			free(err); payment_quote_free(&quotes[loaded]); for(int i=0;i<loaded;i++) payment_quote_free(&quotes[i]); tokens_free(&tokens); free(active); accounts_free(&accounts); return;
+		}
+		if(quotes[loaded].price>LLONG_MAX-total){
+			printf("{\"ok\":false,\"error\":\"payment amount overflow\"}\n");
+			payment_quote_free(&quotes[loaded]); for(int i=0;i<loaded;i++) payment_quote_free(&quotes[i]); tokens_free(&tokens); free(active); accounts_free(&accounts); return;
+		}
+		total+=quotes[loaded].price; loaded++;
+	}
+	long long amount=payment_amount(total,custom_amount);
+	int token_idx=decoy_kind?loaded-1:0;
+	const char *payment_for=decoy_kind?"SHARE_PACKAGE":NULL;
+	char *response=payment_qris_settle_many_ex(acc,&tokens,quotes,loaded,amount,token_idx,payment_for);
+	char *status=json_get_string(response,"status"),*message=json_get_string(response,"message"),*transaction=json_get_string(response,"transaction_code"),*pending=NULL,*qr=NULL,*qr_url=NULL;
+	int ok=payment_ok_status(status);
+	if(ok&&transaction&&*transaction){
+		pending=get_transaction_status_retry(&accounts,acc,&tokens,transaction,""); qr=json_get_string(pending,"qr_code");
+		if(qr&&*qr){ char *encoded=b64_encode((unsigned char *)qr,strlen(qr),1); qr_url=xasprintf("https://ki-ar-kod.netlify.app/?data=%s",encoded); free(encoded); }
+	}
+	printf("{\"ok\":%s,\"payment\":\"qris\",\"mode\":",ok?"true":"false"); json_str(mode);
+	printf(",\"message\":"); json_str(message?message:(status?status:"unknown")); printf(","); print_quotes_json(quotes,loaded); print_amount_json(total,amount);
+	printf(",\"response\":"); json_val(response); if(transaction){ printf(",\"transaction_code\":"); json_str(transaction); } if(pending){ printf(",\"pending_detail\":"); json_val(pending); } if(qr){ printf(",\"qris_code\":"); json_str(qr); } if(qr_url){ printf(",\"qris_url\":"); json_str(qr_url); } printf("}\n");
+	free(status); free(message); free(transaction); free(pending); free(qr); free(qr_url); free(response); for(int i=0;i<loaded;i++) payment_quote_free(&quotes[i]); tokens_free(&tokens); free(active); accounts_free(&accounts);
+}
 static char *wallet_api_number(const char *in){ char b[32]; size_t j=0; for(size_t i=0;in&&in[i]&&j+1<sizeof(b);i++) if(isdigit((unsigned char)in[i])) b[j++]=in[i]; b[j]=0; if(starts_with(b,"628")) return xasprintf("0%s",b+2); if(b[0]=='8') return xasprintf("0%s",b); return xstrdup(b); }
 static const char *ewallet_method_arg(const char *s){ if(!s) return ""; if(!strcmp(s,"DANA")||!strcmp(s,"dana")) return "DANA"; if(!strcmp(s,"SHOPEEPAY")||!strcmp(s,"shopeepay")) return "SHOPEEPAY"; if(!strcmp(s,"GOPAY")||!strcmp(s,"gopay")) return "GOPAY"; return ""; }
 static void cmd_json_payment_ewallet_mode(const char *method,int n,char **codes,const char *wallet_arg,long long custom_amount){ const char *missing=payment_config_missing(); if(missing){ printf("{\"ok\":false,\"error\":\"missing env\",\"missing\":"); json_str(missing); printf("}\n"); return; } if(require_json_payment_confirmed()) return; char *wallet=wallet_api_number(wallet_arg); if(!strcmp(method,"DANA")&&(!starts_with(wallet,"08")||strlen(wallet)<10||strlen(wallet)>13)){ printf("{\"ok\":false,\"error\":\"wallet number must start with 08 and contain 10-13 digits\"}\n"); free(wallet); return; } Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(json_payment_begin(&a,&act,&acc,&t)){ free(wallet); return; } PaymentQuote q[3]; memset(q,0,sizeof(q)); long long total=0; int loaded=0; if(load_payment_quotes_json(&a,acc,&t,n,codes,q,3,&total,&loaded)){ free(wallet); tokens_free(&t); free(act); accounts_free(&a); return; } long long amount=payment_amount(total,custom_amount); char *resp=payment_ewallet_settle_many(acc,&t,q,loaded,amount,method,wallet); char *status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message"),*deeplink=json_get_string(resp,"deeplink"); int ok=payment_ok_status(status); printf("{\"ok\":%s,\"payment\":\"ewallet\",\"method\":",ok?"true":"false"); json_str(method); printf(",\"message\":"); json_str(msg?msg:(status?status:"unknown")); printf(","); print_quotes_json(q,loaded); print_amount_json(total,amount); printf(",\"response\":"); json_val(resp); if(deeplink){ printf(",\"deeplink\":"); json_str(deeplink); } printf("}\n"); free(wallet); free(status); free(msg); free(deeplink); free(resp); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); }
@@ -653,6 +988,7 @@ static void interactive_payment_special(Accounts *a,Account *acc,Tokens *t,const
 static void interactive_payment_decoy(Accounts *a,Account *acc,Tokens *t,const char *option_code,int standard);
 static void interactive_payment_qris(Accounts *a,Account *acc,Tokens *t,const char *option_code);
 static void interactive_payment_ewallet(Accounts *a,Account *acc,Tokens *t,const char *option_code);
+static void interactive_purchase_n_times_option(const char *option_code);
 static int confirm_amount(const char *label,long long total);
 static long long custom_amount_or_prompt(long long total,long long custom_amount);
 static int print_payment_response(const char *resp);
@@ -662,7 +998,57 @@ static int interactive_payment_ewallet_quotes(Accounts *a,Account *acc,Tokens *t
 static int interactive_payment_special_quote(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,const char *mode);
 static const char *family_icon(const char *family){ static char out[12]; if(!family) return "[PKG]"; char b[256]; size_t n=strlen(family); if(n>=sizeof(b)) n=sizeof(b)-1; for(size_t i=0;i<n;i++) b[i]=(char)toupper((unsigned char)family[i]); b[n]=0; if(strstr(b,"HOT")) return "[HOT]"; if(strstr(b,"GAME")) return "[GM]"; if(strstr(b,"VIDEO")||strstr(b,"VIDIO")||strstr(b,"YOUTUBE")||strstr(b,"TIKTOK")) return "[VID]"; if(strstr(b,"AKRAB")||strstr(b,"FAMILY")) return "[AK]"; if(strstr(b,"VOICE")||strstr(b,"NELPON")||strstr(b,"CALL")) return "[CALL]"; if(strstr(b,"SMS")||strstr(b,"TEXT")) return "[SMS]"; if(strstr(b,"UNLIMITED")) return "[UL]"; if(strstr(b,"COMBO")||strstr(b,"DATA")||strstr(b,"KUOTA")) return "[DATA]"; char abbr[5]={0}; int k=0,new_word=1; for(size_t i=0;b[i]&&k<4;i++){ if(isalnum((unsigned char)b[i])&&new_word){ abbr[k++]=b[i]; new_word=0; } else if(!isalnum((unsigned char)b[i])) new_word=1; } if(!abbr[0]) snprintf(out,sizeof(out),"[PKG]"); else snprintf(out,sizeof(out),"[%s]",abbr); return out; }
 static char *first_json_string(const char *json,const char **keys,size_t n){ for(size_t i=0;i<n;i++){ char *v=json_get_string(json,keys[i]); if(v&&*v) return v; free(v); } return NULL; }
-static void show_package_detail_cli(Accounts *a,Account *acc,Tokens *t,const char *option_code,CartItem cart[3],int *cart_n){ char *detail=get_package_detail_retry(a,acc,t,option_code); if(!package_detail_valid(detail)){ printf("Gagal load detail: %s\n",detail); free(detail); pause_enter(); return; } char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail); char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}"); char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}"); char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}"); char *fname=json_get_string(family,"name"),*vname=json_get_string(variant,"name"),*oname=json_get_string(option,"name"),*validity=json_get_string(option,"validity"),*payfor=json_get_string(family,"payment_for"),*plan=json_get_string(family,"plan_type"); long long price=json_get_ll_any(option,"price",0),point=json_get_ll_any(option,"point",0); char pricebuf[64]; money_id(price,pricebuf,sizeof(pricebuf)); int redeem=payfor&&!strcmp(payfor,"REDEEM_VOUCHER"); printf("\033[H\033[J%s=======================================================%s\n",CC,C0); printf("%sDetail Paket%s\n",CB,C0); printf("%s=======================================================%s\n",CC,C0); printf("Nama       : %s%s%s%s%s%s%s\n",fname?fname:"",vname&&*vname?" - ":"",vname?vname:"",oname&&*oname?" - ":"",oname?oname:"",C0,""); printf("Harga      : Rp %s\nMasa Aktif : %s\nPoint      : %lld\nPayment For: %s\nPlan Type  : %s\n",pricebuf,validity?validity:"-",point,payfor?payfor:"-",plan?plan:"-"); printf("%s-------------------------------------------------------%s\nKuota Detail\n",CL,C0); const char *bs,*be; if(!json_array_span(option,"benefits",&bs,&be)){ const char *bp=bs; while(bp<be){ char *ben=next_object(&bp,be); if(!ben) break; char *bn=json_get_string(ben,"name"),*dt=json_get_string(ben,"data_type"); long long total=json_get_ll_any(ben,"total",0),unlim=json_get_ll_any(ben,"is_unlimited",0); char q[64]; if(unlim) snprintf(q,sizeof(q),"Unlimited"); else quota_value_str(dt?dt:"DATA",total,q,sizeof(q)); printf("- %-32s %12s\n",bn?bn:"Benefit",q); free(bn); free(dt); free(ben); } } else puts("Tidak ada detail kuota."); printf("%s-------------------------------------------------------%s\nCart: %d/3\n",CL,C0,*cart_n); char ch[16]; prompt_line(redeem?"a cart, b pulsa, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, p point, v voucher/bonus, g kirim bonus, Enter kembali: ":"a cart, b pulsa, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, Enter kembali: ",ch,sizeof(ch)); if((ch[0]=='a'||ch[0]=='A')){ if(*cart_n>=3) puts("Cart penuh. Max 3 paket."); else { snprintf(cart[*cart_n].code,sizeof(cart[*cart_n].code),"%s",option_code); snprintf(cart[*cart_n].name,sizeof(cart[*cart_n].name),"%s%s%s",vname?vname:"",(vname&&oname)?" ":"",oname?oname:option_code); cart[*cart_n].price=price; (*cart_n)++; puts("Masuk cart."); } pause_enter(); } else if(ch[0]=='b'||ch[0]=='B') interactive_payment_pulsa(a,acc,t,option_code); else if(ch[0]=='s'||ch[0]=='S') interactive_payment_decoy(a,acc,t,option_code,1); else if(ch[0]=='x'||ch[0]=='X') interactive_payment_decoy(a,acc,t,option_code,0); else if(ch[0]=='q'||ch[0]=='Q') interactive_payment_qris(a,acc,t,option_code); else if(ch[0]=='e'||ch[0]=='E') interactive_payment_ewallet(a,acc,t,option_code); else if(redeem&&(ch[0]=='p'||ch[0]=='P')) interactive_payment_special(a,acc,t,option_code,"point"); else if(redeem&&(ch[0]=='v'||ch[0]=='V')) interactive_payment_special(a,acc,t,option_code,"voucher"); else if(redeem&&(ch[0]=='g'||ch[0]=='G')) interactive_payment_special(a,acc,t,option_code,"gift"); free(detail); free(data); free(option); free(family); free(variant); free(fname); free(vname); free(oname); free(validity); free(payfor); free(plan); }
+static void show_package_detail_cli(Accounts *a,Account *acc,Tokens *t,const char *option_code,CartItem cart[3],int *cart_n){
+	char *detail=get_package_detail_retry(a,acc,t,option_code);
+	if(!package_detail_valid(detail)){ printf("Gagal load detail: %s\n",detail); free(detail); pause_enter(); return; }
+	char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail);
+	char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}");
+	char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}");
+	char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}");
+	char *fname=json_get_string(family,"name"),*vname=json_get_string(variant,"name"),*oname=json_get_string(option,"name"),*validity=json_get_string(option,"validity"),*payfor=json_get_string(family,"payment_for"),*plan=json_get_string(family,"plan_type");
+	long long price=json_get_ll_any(option,"price",0),point=json_get_ll_any(option,"point",0);
+	char pricebuf[64]; money_id(price,pricebuf,sizeof(pricebuf));
+	int redeem=payfor&&!strcmp(payfor,"REDEEM_VOUCHER");
+	printf("\033[H\033[J%s=======================================================%s\n",CC,C0);
+	printf("%sDetail Paket%s\n",CB,C0);
+	printf("%s=======================================================%s\n",CC,C0);
+	printf("Nama       : %s%s%s%s%s%s%s\n",fname?fname:"",vname&&*vname?" - ":"",vname?vname:"",oname&&*oname?" - ":"",oname?oname:"",C0,"");
+	printf("Harga      : Rp %s\nMasa Aktif : %s\nPoint      : %lld\nPayment For: %s\nPlan Type  : %s\n",pricebuf,validity?validity:"-",point,payfor?payfor:"-",plan?plan:"-");
+	printf("%s-------------------------------------------------------%s\nKuota Detail\n",CL,C0);
+	const char *bs,*be;
+	if(!json_array_span(option,"benefits",&bs,&be)){
+		const char *bp=bs;
+		while(bp<be){
+			char *benefit=next_object(&bp,be); if(!benefit) break;
+			char *name=json_get_string(benefit,"name"),*type=json_get_string(benefit,"data_type");
+			long long total=json_get_ll_any(benefit,"total",0),unlimited=json_get_ll_any(benefit,"is_unlimited",0);
+			char quota[64]; if(unlimited) snprintf(quota,sizeof(quota),"Unlimited"); else quota_value_str(type?type:"DATA",total,quota,sizeof(quota));
+			printf("- %-32s %12s\n",name?name:"Benefit",quota);
+			free(name); free(type); free(benefit);
+		}
+	} else puts("Tidak ada detail kuota.");
+	printf("%s-------------------------------------------------------%s\nCart: %d/3\n",CL,C0,*cart_n);
+	char choice[16];
+	prompt_line(redeem?"a cart, b pulsa, n Pulsa N Kali, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, p point, v voucher/bonus, g kirim bonus, Enter kembali: ":"a cart, b pulsa, n Pulsa N Kali, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, Enter kembali: ",choice,sizeof(choice));
+	if(choice[0]=='a'||choice[0]=='A'){
+		if(*cart_n>=3) puts("Cart penuh. Max 3 paket.");
+		else {
+			snprintf(cart[*cart_n].code,sizeof(cart[*cart_n].code),"%s",option_code);
+			snprintf(cart[*cart_n].name,sizeof(cart[*cart_n].name),"%s%s%s",vname?vname:"",(vname&&oname)?" ":"",oname?oname:option_code);
+			cart[*cart_n].price=price; (*cart_n)++; puts("Masuk cart.");
+		}
+		pause_enter();
+	} else if(choice[0]=='b'||choice[0]=='B') interactive_payment_pulsa(a,acc,t,option_code);
+	else if(choice[0]=='n'||choice[0]=='N') interactive_purchase_n_times_option(option_code);
+	else if(choice[0]=='s'||choice[0]=='S') interactive_payment_decoy(a,acc,t,option_code,1);
+	else if(choice[0]=='x'||choice[0]=='X') interactive_payment_decoy(a,acc,t,option_code,0);
+	else if(choice[0]=='q'||choice[0]=='Q') interactive_payment_qris(a,acc,t,option_code);
+	else if(choice[0]=='e'||choice[0]=='E') interactive_payment_ewallet(a,acc,t,option_code);
+	else if(redeem&&(choice[0]=='p'||choice[0]=='P')) interactive_payment_special(a,acc,t,option_code,"point");
+	else if(redeem&&(choice[0]=='v'||choice[0]=='V')) interactive_payment_special(a,acc,t,option_code,"voucher");
+	else if(redeem&&(choice[0]=='g'||choice[0]=='G')) interactive_payment_special(a,acc,t,option_code,"gift");
+	free(detail); free(data); free(option); free(family); free(variant); free(fname); free(vname); free(oname); free(validity); free(payfor); free(plan);
+}
 static void checkout_cart_pulsa(Accounts *a,Account *acc,Tokens *t,CartItem cart[3],int *cart_n){
 	if(*cart_n<1){ puts("Cart kosong."); pause_enter(); return; }
 	const char *missing=payment_config_missing();
@@ -670,13 +1056,24 @@ static void checkout_cart_pulsa(Accounts *a,Account *acc,Tokens *t,CartItem cart
 	PaymentQuote q[4]; memset(q,0,sizeof(q));
 	long long total=0; int loaded=0;
 	for(int i=0;i<*cart_n;i++){
-		char *err=NULL;
-		if(payment_quote_load_retry(a,acc,t,cart[i].code,&q[i],&err)){
+		char *err=NULL; int refreshed=0;
+		if(payment_quote_load_retry_track(a,acc,t,cart[i].code,&q[i],&err,&refreshed)){
 			printf("Quote gagal %s: %s\n",cart[i].name,err?err:"unknown");
 			free(err);
 			for(int j=0;j<loaded;j++) payment_quote_free(&q[j]);
 			pause_enter();
 			return;
+		}
+		if(refreshed&&loaded>0){
+			long long reloaded_total=0;
+			if(payment_quotes_reload_current(t,q,loaded,&reloaded_total,&err)){
+				printf("Quote sebelumnya gagal dimuat ulang setelah refresh token: %s\n",err?err:"unknown");
+				free(err); payment_quote_free(&q[i]); pause_enter(); return;
+			}
+			total=reloaded_total;
+		}
+		if(q[i].price>LLONG_MAX-total){
+			puts("Total quote cart overflow."); payment_quote_free(&q[i]); for(int j=0;j<loaded;j++) payment_quote_free(&q[j]); pause_enter(); return;
 		}
 		total+=q[i].price;
 		loaded++;
@@ -765,13 +1162,18 @@ static int interactive_payment_ewallet_quotes(Accounts *a,Account *acc,Tokens *t
 static int interactive_payment_decoy_quotes(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,long long custom_amount,int standard){
 	const char *label=standard?"Balance + Decoy":"Balance + Decoy V2";
 	if(n>3){ printf("%s max 3 paket.\n",label); return 0; }
-	char *err=NULL,*decoy=decoy_option_code(t,acc,"balance",&err);
-	if(!decoy){ printf("Decoy gagal: %s\n",err?err:"unknown"); free(err); return 0; }
-	if(payment_quote_load_retry(a,acc,t,decoy,&q[n],&err)){
-		printf("Quote decoy gagal: %s\n",err?err:"unknown");
+	char *err=NULL,*decoy=NULL; int decoy_refreshed=0;
+	if(decoy_quote_resolve(a,acc,t,&q[n],&decoy,&err,&decoy_refreshed)){
+		printf("Decoy gagal sebelum settlement: %s\n",err?err:"resolve/validation failed");
 		free(err); free(decoy); return 0;
 	}
-	free(decoy); total+=q[n].price;
+	free(decoy);
+	if(decoy_refreshed&&payment_quotes_reload_current(t,q,n,&total,&err)){
+		printf("Target quote gagal dimuat ulang setelah refresh decoy: %s\n",err?err:"unknown");
+		free(err); payment_quote_free(&q[n]); return 0;
+	}
+	if(q[n].price>LLONG_MAX-total){ puts("Decoy gagal: payment amount overflow"); payment_quote_free(&q[n]); return 0; }
+	total+=q[n].price;
 	long long amount=custom_amount_or_prompt(total,custom_amount);
 	if(confirm_amount(label,amount)){ payment_quote_free(&q[n]); return 0; }
 	int token_idx=standard?0:n;
@@ -806,23 +1208,13 @@ static char *repeat_family_option_code(Accounts *a,Account *acc,Tokens *t,const 
 	}
 	return code;
 }
-static char *repeat_decoy_option_code(Accounts *a,Account *acc,Tokens *t,char **err){
-	*err=NULL;
-	char *code=decoy_option_code(t,acc,"balance",err);
-	if(!code&&*err&&api_auth_failed(*err)){
-		char *auth_err=*err; *err=NULL;
-		if(!api_retry_auth(acc,a,t)){ free(auth_err); code=decoy_option_code(t,acc,"balance",err); }
-		else *err=auth_err;
-	}
-	return code;
-}
 static void repeat_prefix_item_name(PaymentQuote *q){
 	unsigned char random[2]; random_bytes(random,sizeof(random));
 	unsigned int prefix=1000U+((((unsigned int)random[0]<<8)|random[1])%9000U);
 	char *name=xasprintf("%u %s",prefix,q->item_name?q->item_name:"");
 	free(q->item_name); q->item_name=name;
 }
-static int repeat_purchase_run(const char *family,const char *variant,int order,const char *option_code,const RepeatPurchaseOptions *opts){
+static int repeat_purchase_run(const char *family,const char *variant,int order,const char *option_code,const RepeatPurchaseOptions *opts,int decoy_confirmed){
 	Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0};
 	if(cli_begin(&a,&act,&acc,&t)) return 1;
 	PaymentQuote preflight_q[2]; memset(preflight_q,0,sizeof(preflight_q));
@@ -831,21 +1223,26 @@ static int repeat_purchase_run(const char *family,const char *variant,int order,
 	if(option_code) preflight_target=xstrdup(option_code);
 	else preflight_target=repeat_family_option_code(&a,acc,&t,family,variant,order,&preflight_err);
 	if(!preflight_target){ fprintf(stderr,"repeat preflight failed: %s\n",preflight_err?preflight_err:"target family/variant/order not found"); goto repeat_preflight_done; }
-	if(opts->use_decoy){
-		preflight_decoy=repeat_decoy_option_code(&a,acc,&t,&preflight_err);
-		if(!preflight_decoy){ fprintf(stderr,"repeat preflight failed: %s\n",preflight_err?preflight_err:"decoy option not found"); goto repeat_preflight_done; }
-	}
-	if(payment_quote_load_retry(&a,acc,&t,preflight_target,&preflight_q[0],&preflight_err)){
+	int preflight_decoy_refreshed=0;
+	if(payment_quote_load_retry_track(&a,acc,&t,preflight_target,&preflight_q[0],&preflight_err,NULL)){
 		fprintf(stderr,"repeat preflight failed: %s\n",preflight_err?preflight_err:"target quote failed"); goto repeat_preflight_done;
 	}
-	if(opts->use_decoy){
-		if(payment_quote_load_retry(&a,acc,&t,preflight_decoy,&preflight_q[1],&preflight_err)){
-			fprintf(stderr,"repeat preflight failed: %s\n",preflight_err?preflight_err:"decoy quote failed"); goto repeat_preflight_done;
+	if(opts->use_decoy&&decoy_quote_resolve(&a,acc,&t,&preflight_q[1],&preflight_decoy,&preflight_err,&preflight_decoy_refreshed)){
+		fprintf(stderr,"repeat preflight failed before settlement: %s\n",preflight_err?preflight_err:"decoy resolve/validation failed"); goto repeat_preflight_done;
+	}
+	if(opts->use_decoy&&preflight_decoy_refreshed){
+		payment_quote_free(&preflight_q[0]);
+		if(payment_quote_load(&t,preflight_target,&preflight_q[0],&preflight_err)){
+			fprintf(stderr,"repeat preflight failed reloading target after decoy refresh: %s\n",preflight_err?preflight_err:"target quote failed"); goto repeat_preflight_done;
 		}
+	}
+	if(opts->use_decoy){
 		char decoy_price[64],answer[16]; money_id(preflight_q[1].price,decoy_price,sizeof(decoy_price));
 		printf("Pastikan sisa balance KURANG DARI Rp %s (harga decoy).\n",decoy_price);
-		prompt_line("Lanjutkan repeat purchase dengan decoy? (y/N): ",answer,sizeof(answer));
-		if(answer[0]!='y'&&answer[0]!='Y'){ puts("Repeat purchase dibatalkan."); preflight_cancelled=1; goto repeat_preflight_done; }
+		if(!decoy_confirmed){
+			prompt_line("Lanjutkan repeat purchase dengan decoy? (y/N): ",answer,sizeof(answer));
+			if(answer[0]!='y'&&answer[0]!='Y'){ puts("Repeat purchase dibatalkan."); preflight_cancelled=1; goto repeat_preflight_done; }
+		}
 	}
 	preflight_ok=1;
 repeat_preflight_done:
@@ -860,32 +1257,34 @@ repeat_preflight_done:
 	for(int round=0;round<opts->count;round++){
 		PaymentQuote q[2]; memset(q,0,sizeof(q));
 		char *target_code=NULL,*decoy_code=NULL,*display_name=NULL,*err=NULL,*reason=NULL,*resp=NULL,*first=NULL,*status=NULL,*msg=NULL;
-		long long amount=0; int round_ok=0,settlement_attempted=0;
+		long long amount=0; int round_ok=0;
 		tokens_free(&t);
 		if(refresh_account(acc,&t)){ reason=xstrdup("active token retrieval failed"); goto repeat_round_done; }
 		account_sync(&a,acc,&t);
 		if(option_code) target_code=xstrdup(option_code);
 		else target_code=repeat_family_option_code(&a,acc,&t,family,variant,order,&err);
 		if(!target_code){ reason=err?err:xstrdup("target family/variant/order not found"); err=NULL; goto repeat_round_done; }
-		if(opts->use_decoy){
-			decoy_code=repeat_decoy_option_code(&a,acc,&t,&err);
-			if(!decoy_code){ reason=err?err:xstrdup("decoy option not found"); err=NULL; goto repeat_round_done; }
-		}
-		if(payment_quote_load_retry(&a,acc,&t,target_code,&q[0],&err)){
+		int decoy_refreshed=0;
+		if(payment_quote_load_retry_track(&a,acc,&t,target_code,&q[0],&err,NULL)){
 			reason=err?err:xstrdup("target quote failed"); err=NULL; goto repeat_round_done;
+		}
+		if(opts->use_decoy&&decoy_quote_resolve(&a,acc,&t,&q[1],&decoy_code,&err,&decoy_refreshed)){
+			reason=err?err:xstrdup("decoy resolve/validation failed before settlement"); err=NULL; goto repeat_round_done;
+		}
+		if(opts->use_decoy&&decoy_refreshed){
+			payment_quote_free(&q[0]);
+			if(payment_quote_load(&t,target_code,&q[0],&err)){
+				reason=err?err:xstrdup("target quote reload failed after decoy refresh"); err=NULL; goto repeat_round_done;
+			}
 		}
 		amount=q[0].price;
 		if(opts->use_decoy){
-			if(payment_quote_load_retry(&a,acc,&t,decoy_code,&q[1],&err)){
-				reason=err?err:xstrdup("decoy quote failed"); err=NULL; goto repeat_round_done;
-			}
 			if(q[1].price>LLONG_MAX-amount){ reason=xstrdup("payment amount overflow"); goto repeat_round_done; }
 			amount+=q[1].price;
 		}
 		display_name=xstrdup(q[0].item_name);
 		repeat_prefix_item_name(&q[0]);
 		if(opts->use_decoy) repeat_prefix_item_name(&q[1]);
-		settlement_attempted=1;
 		resp=payment_pulsa_settle_retry(acc,&t,q,opts->use_decoy?2:1,&amount,opts->token_idx,DECOY_V2_PAYMENT_FOR,&first);
 		status=resp?json_get_string(resp,"status"):NULL;
 		msg=resp?json_get_string(resp,"message"):NULL;
@@ -904,7 +1303,10 @@ repeat_round_done:
 		if(first) printf("  Bizz-err.Amount.Total adjusted amount to %lld and retried with token index %d.\n",amount,opts->token_idx);
 		free(target_code); free(decoy_code); free(display_name); free(err); free(reason); free(resp); free(first); free(status); free(msg);
 		payment_quote_free(&q[0]); payment_quote_free(&q[1]);
-		if(settlement_attempted&&opts->delay_seconds&&round+1<opts->count) sleep(opts->delay_seconds);
+		if(opts->delay_seconds&&round+1<opts->count){
+			printf("Waiting for %u seconds before next purchase...\n",opts->delay_seconds);
+			sleep(opts->delay_seconds);
+		}
 	}
 	printf("Repeat purchase summary: requested=%d success=%d failed=%d\n",opts->count,success,failed);
 	if(successful.n){ puts("Successful purchases:"); for(size_t i=0;i<successful.n;i++) printf("%zu. %s\n",i+1,successful.v[i]); }
@@ -920,7 +1322,7 @@ static int cmd_purchase_n_times(int argc,char **argv){
 	if(parse_bounded_ll(argv[3],1,INT_MAX,&count)) die("invalid count: %s",argv[3]);
 	RepeatPurchaseOptions opts; parse_repeat_purchase_options(argc-4,argv+4,(int)count,&opts);
 	const char *missing=payment_config_missing(); if(missing) die("missing env %s",missing);
-	return repeat_purchase_run(argv[0],argv[1],(int)order,NULL,&opts);
+	return repeat_purchase_run(argv[0],argv[1],(int)order,NULL,&opts,0);
 }
 static int cmd_purchase_n_times_by_option_code(int argc,char **argv){
 	if(argc<2) die("usage: engsel purchase-n-times-by-option-code <option_code> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]");
@@ -928,54 +1330,232 @@ static int cmd_purchase_n_times_by_option_code(int argc,char **argv){
 	long long count=0; if(parse_bounded_ll(argv[1],1,INT_MAX,&count)) die("invalid count: %s",argv[1]);
 	RepeatPurchaseOptions opts; parse_repeat_purchase_options(argc-2,argv+2,(int)count,&opts);
 	const char *missing=payment_config_missing(); if(missing) die("missing env %s",missing);
-	return repeat_purchase_run(NULL,NULL,0,argv[0],&opts);
+	return repeat_purchase_run(NULL,NULL,0,argv[0],&opts,0);
 }
-static void interactive_repeat_purchase(void){
+static void interactive_purchase_n_times_option(const char *option_code){
 	const char *missing=payment_config_missing();
 	if(missing){ printf("Missing env %s. Set di Settings dulu.\n",missing); pause_enter(); return; }
-	char target_kind[8],family[256]={0},variant[256]={0},option[256]={0},input[64],answer[32];
-	long long parsed=0; int order=0;
+	if(!purchase_code_ok(option_code)){ puts("Option Code target tidak valid."); pause_enter(); return; }
+	char answer[32],input[64]; long long parsed=0;
 	RepeatPurchaseOptions opts; memset(&opts,0,sizeof(opts));
-	printf("\033[H\033[J%s=======================================================%s\n",CC,C0);
-	printf("%sPembelian Berulang%s\n",CB,C0);
-	printf("%s=======================================================%s\n",CC,C0);
-	puts("1. Pilih Paket via Family + Variant + Order\n2. Pilih Paket via Option Code\n00. Kembali");
-	prompt_line("Pilih target: ",target_kind,sizeof(target_kind));
-	if(!target_kind[0]||!strcmp(target_kind,"00")) return;
-	if(!strcmp(target_kind,"1")){
-		prompt_line("Family code: ",family,sizeof(family));
-		prompt_line("Variant code: ",variant,sizeof(variant));
-		prompt_line("Option order: ",input,sizeof(input));
-		if(!purchase_code_ok(family)||!purchase_code_ok(variant)||parse_bounded_ll(input,0,INT_MAX,&parsed)) goto repeat_input_invalid;
-		order=(int)parsed;
-	} else if(!strcmp(target_kind,"2")){
-		prompt_line("Option code: ",option,sizeof(option));
-		if(!purchase_code_ok(option)) goto repeat_input_invalid;
-	} else goto repeat_input_invalid;
-	prompt_line("Jumlah pembelian: ",input,sizeof(input));
-	if(parse_bounded_ll(input,1,INT_MAX,&parsed)) goto repeat_input_invalid;
+	prompt_line("Use decoy package? (y/n): ",answer,sizeof(answer));
+	if(parse_bool_strict(answer,&opts.use_decoy)) goto repeat_option_invalid;
+	prompt_line("Enter number of times to purchase: ",input,sizeof(input));
+	if(parse_bounded_ll(input,1,INT_MAX,&parsed)) goto repeat_option_invalid;
 	opts.count=(int)parsed;
-	prompt_line("Delay antar pembelian dalam detik [0]: ",input,sizeof(input));
-	if(input[0]){ if(parse_bounded_ll(input,0,UINT_MAX,&parsed)) goto repeat_input_invalid; opts.delay_seconds=(unsigned int)parsed; }
-	prompt_line("Gunakan decoy? (y/N): ",answer,sizeof(answer));
-	if(answer[0]&&parse_bool_strict(answer,&opts.use_decoy)) goto repeat_input_invalid;
-	opts.token_idx_raw=0;
-	prompt_line(opts.use_decoy?"Token confirmation index (0/-2 target, 1/-1 decoy) [0]: ":"Token confirmation index (0/-1 target) [0]: ",input,sizeof(input));
-	if(input[0]){ if(parse_bounded_ll(input,INT_MIN,INT_MAX,&parsed)) goto repeat_input_invalid; opts.token_idx_raw=(int)parsed; }
-	if(repeat_token_index_strict(opts.token_idx_raw,opts.use_decoy?2:1,&opts.token_idx)) goto repeat_input_invalid;
+	prompt_line("Enter delay between purchases in seconds: ",input,sizeof(input));
+	if(parse_bounded_ll(input,0,UINT_MAX,&parsed)) goto repeat_option_invalid;
+	opts.delay_seconds=(unsigned int)parsed;
+	opts.token_idx_raw=opts.use_decoy?1:0;
+	opts.token_idx=opts.token_idx_raw;
 	printf("%s-------------------------------------------------------%s\n",CL,C0);
-	printf("Target : %s\n",!strcmp(target_kind,"1")?"Family + Variant + Order":"Option Code");
-	if(!strcmp(target_kind,"1")) printf("Family : %s\nVariant: %s\nOrder  : %d\n",family,variant,order);
-	else printf("Option : %s\n",option);
-	printf("Jumlah : %d\nDelay  : %u detik\nDecoy  : %s\nToken  : raw=%d, selected=%d (%s)\nPayment For: %s (upstream repeat)\n",opts.count,opts.delay_seconds,opts.use_decoy?"Ya":"Tidak",opts.token_idx_raw,opts.token_idx,(opts.use_decoy&&opts.token_idx==1)?"decoy":"target",DECOY_V2_PAYMENT_FOR);
-	char expected[64]; snprintf(expected,sizeof(expected),"BELI %d",opts.count);
+	printf("Pulsa N Kali\nTarget Option Code : %s\nJumlah Pembelian  : %d\nDelay              : %u detik\nUse Decoy          : %s\nToken Source       : %s\nPayment For        : %s\n",option_code,opts.count,opts.delay_seconds,opts.use_decoy?"Ya":"Tidak",opts.use_decoy?"decoy":"target",DECOY_V2_PAYMENT_FOR);
+	char expected[64]; snprintf(expected,sizeof(expected),"BELI %d KALI",opts.count);
 	printf("Ketik %s untuk konfirmasi: ",expected); fflush(stdout);
-	if(!fgets(answer,sizeof(answer),stdin)) answer[0]=0; trim(answer);
-	if(strcmp(answer,expected)){ puts("Pembelian berulang dibatalkan."); pause_enter(); return; }
-	repeat_purchase_run(!strcmp(target_kind,"1")?family:NULL,!strcmp(target_kind,"1")?variant:NULL,order,!strcmp(target_kind,"2")?option:NULL,&opts);
-	pause_enter(); return;
-repeat_input_invalid:
-	puts("Input pembelian berulang tidak valid."); pause_enter();
+	if(!fgets(answer,sizeof(answer),stdin)) answer[0]=0;
+	trim(answer);
+	if(strcmp(answer,expected)){ puts("Pulsa N Kali dibatalkan."); pause_enter(); return; }
+	repeat_purchase_run(NULL,NULL,0,option_code,&opts,0);
+	pause_enter();
+	return;
+repeat_option_invalid:
+	puts("Input Pulsa N Kali tidak valid.");
+	pause_enter();
+}
+static int family_purchase_options_load(const char *response,const char *family_code,QuotaList *options,char **family_name,char **err){
+	if(err) *err=NULL;
+	if(family_name) *family_name=NULL;
+	char *data=json_object_dup(response,"data"); if(!data) data=xstrdup(response);
+	char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}");
+	char *name=json_get_string(family,"name");
+	const char *vs,*ve;
+	if(json_array_span(data,"package_variants",&vs,&ve)){
+		if(err) *err=xasprintf("target family %s gagal dimuat: %s",family_code,response);
+		free(data); free(family); free(name);
+		return -1;
+	}
+	int number=0; const char *vp=vs;
+	while(vp<ve){
+		char *variant=next_object(&vp,ve); if(!variant) break;
+		char *variant_name=json_get_string(variant,"name"),*variant_code=json_get_string(variant,"package_variant_code");
+		const char *os,*oe;
+		if(!json_array_span(variant,"package_options",&os,&oe)){
+			const char *op=os;
+			while(op<oe){
+				char *option=next_object(&op,oe); if(!option) break;
+				char *option_name=json_get_string(option,"name"),*option_code=json_get_string(option,"package_option_code");
+				long long option_order=json_get_ll_any(option,"order",-1);
+				number++;
+				if(!option_code||!*option_code||option_order<0||option_order>INT_MAX){
+					if(err) *err=xasprintf("target family %s memiliki package option tidak valid pada nomor %d",family_code,number);
+					free(option_name); free(option_code); free(option); free(variant_name); free(variant_code); free(variant); free(data); free(family); free(name); ql_free(options);
+					return -1;
+				}
+				char number_text[32]; snprintf(number_text,sizeof(number_text),"%lld",option_order);
+				ql_add(options,option_name?option_name:xstrdup(option_code),xstrdup(variant_name?variant_name:""),option_code,xstrdup(number_text),xstrdup(variant_code?variant_code:""));
+				free(option);
+			}
+		}
+		free(variant_name); free(variant_code); free(variant);
+	}
+	free(data); free(family);
+	if(!options->n){
+		if(err) *err=xasprintf("target family %s tidak memiliki package option",family_code);
+		free(name);
+		return -1;
+	}
+	if(family_name) *family_name=name?name:xstrdup(family_code); else free(name);
+	return 0;
+}
+static int family_purchase_start_index(const QuotaList *options,int start_option,size_t *index_out){
+	if(!options||!options->n||!index_out) return -1;
+	if(start_option<=1){ *index_out=0; return 0; }
+	for(size_t i=0;i<options->n;i++){
+		long long option_order=0;
+		if(!parse_bounded_ll(options->v[i].domain,0,INT_MAX,&option_order)&&option_order==start_option){ *index_out=i; return 0; }
+	}
+	return -1;
+}
+static int family_purchase_run(const char *family_code,const FamilyPurchaseOptions *opts){
+	Accounts accounts={0}; char *active=NULL; Account *acc=NULL; Tokens tokens={0};
+	if(cli_begin(&accounts,&active,&acc,&tokens)) return 1;
+	char *family_response=get_store_family_retry(&accounts,acc,&tokens,family_code,"");
+	QuotaList options={0}; char *family_name=NULL,*err=NULL;
+	if(family_purchase_options_load(family_response,family_code,&options,&family_name,&err)){
+		fprintf(stderr,"purchase-by-family preflight failed: %s\n",err?err:"family lookup failed");
+		free(err); free(family_response); tokens_free(&tokens); free(active); accounts_free(&accounts); return 1;
+	}
+	free(family_response);
+	size_t start_index=0;
+	if(family_purchase_start_index(&options,opts->start_option,&start_index)){
+		fprintf(stderr,"purchase-by-family preflight failed: option order %d tidak tersedia pada family target\n",opts->start_option);
+		ql_free(&options); free(family_name); tokens_free(&tokens); free(active); accounts_free(&accounts); return 1;
+	}
+	PaymentQuote preflight_decoy={0}; char *preflight_code=NULL;
+	if(opts->use_decoy&&decoy_quote_resolve(&accounts,acc,&tokens,&preflight_decoy,&preflight_code,&err,NULL)){
+		fprintf(stderr,"purchase-by-family preflight failed before settlement: %s\n",err?err:"decoy resolve/validation failed");
+		free(err); free(preflight_code); ql_free(&options); free(family_name); tokens_free(&tokens); free(active); accounts_free(&accounts); return 1;
+	}
+	if(opts->use_decoy){
+		char price[64]; money_id(preflight_decoy.price,price,sizeof(price));
+		printf("Pastikan sisa balance KURANG DARI Rp %s (harga decoy).\n",price);
+	}
+	free(preflight_code); payment_quote_free(&preflight_decoy);
+	printf("%s-------------------------------------------------------%s\n",CL,C0);
+	printf("Beli Semua Paket dalam Family Code (Loop)\nFamily Name       : %s\nFamily Code       : %s\nTotal Paket       : %zu\nMulai Option Order: %d\nJumlah Diproses   : %zu\nUse Decoy         : %s\nPause Saat Sukses : %s\nDelay             : %u detik\nPayment For Awal : %s\nBizz Retry        : SHARE_PACKAGE\n",family_name,family_code,options.n,opts->start_option,options.n-start_index,opts->use_decoy?"Ya":"Tidak",opts->pause_on_success?"Ya":"Tidak",opts->delay_seconds,FAMILY_LOOP_PAYMENT_FOR);
+	char confirm[32]; prompt_line("Ketik BELI SEMUA untuk konfirmasi: ",confirm,sizeof(confirm));
+	if(strcmp(confirm,"BELI SEMUA")){
+		puts("Beli semua paket dibatalkan.");
+		ql_free(&options); free(family_name); tokens_free(&tokens); free(active); accounts_free(&accounts); return 0;
+	}
+	int success=0,failed=0,processed=0; StrList successful={0};
+	for(size_t index=start_index;index<options.n;index++){
+		PaymentQuote quote[2]; memset(quote,0,sizeof(quote));
+		char *target_code=xstrdup(options.v[index].code),*decoy_code=NULL,*reason=NULL,*response=NULL,*status=NULL,*message=NULL;
+		long long amount=0; int round_ok=0,settlement_attempted=0,decoy_refreshed=0,retried=0;
+		processed++;
+		tokens_free(&tokens);
+		if(refresh_account(acc,&tokens)){ reason=xstrdup("active token retrieval failed"); goto family_round_done; }
+		account_sync(&accounts,acc,&tokens);
+		if(payment_quote_load_retry_track(&accounts,acc,&tokens,target_code,&quote[0],&err,NULL)){
+			reason=err?err:xstrdup("target quote failed"); err=NULL; goto family_round_done;
+		}
+		if(opts->use_decoy&&decoy_quote_resolve(&accounts,acc,&tokens,&quote[1],&decoy_code,&err,&decoy_refreshed)){
+			reason=err?err:xstrdup("decoy resolve/validation failed before settlement"); err=NULL; goto family_round_done;
+		}
+		if(opts->use_decoy&&decoy_refreshed){
+			payment_quote_free(&quote[0]);
+			if(payment_quote_load(&tokens,target_code,&quote[0],&err)){
+				reason=err?err:xstrdup("target quote reload failed after decoy refresh"); err=NULL; goto family_round_done;
+			}
+		}
+		amount=quote[0].price;
+		if(opts->use_decoy){
+			if(quote[1].price>LLONG_MAX-amount){ reason=xstrdup("payment amount overflow"); goto family_round_done; }
+			amount+=quote[1].price;
+		}
+		repeat_prefix_item_name(&quote[0]);
+		if(opts->use_decoy) repeat_prefix_item_name(&quote[1]);
+		settlement_attempted=1;
+		response=payment_pulsa_settle_many_ex(acc,&tokens,quote,opts->use_decoy?2:1,amount,opts->use_decoy?1:0,FAMILY_LOOP_PAYMENT_FOR);
+		long long adjusted=payment_bizz_amount(response);
+		if(adjusted>=0){
+			printf("Adjusted total amount to: %lld\n",adjusted);
+			free(response); response=NULL; amount=adjusted; retried=1;
+			response=payment_pulsa_settle_many_ex(acc,&tokens,quote,opts->use_decoy?2:1,amount,opts->use_decoy?-1:0,"SHARE_PACKAGE");
+		}
+		status=response?json_get_string(response,"status"):NULL;
+		message=response?json_get_string(response,"message"):NULL;
+		round_ok=payment_ok_status(status);
+		if(!round_ok) reason=xstrdup(message?message:(status?status:((response&&*response)?"unparseable payment response":"empty payment response")));
+family_round_done:
+		if(round_ok){
+			success++;
+			sl_add(&successful,xasprintf("%s | %s | amount=%lld",options.v[index].group,options.v[index].name,amount));
+			printf("[%zu/%zu] SUCCESS - %s | %s | amount=%lld%s\n",index+1,options.n,options.v[index].group,options.v[index].name,amount,retried?" | Bizz retry SHARE_PACKAGE":"");
+			if(opts->pause_on_success) pause_enter();
+		} else {
+			failed++;
+			printf("[%zu/%zu] FAILED - %s | %s - %s\n",index+1,options.n,options.v[index].group,options.v[index].name,reason?reason:"unknown error");
+			if(response) printf("  Response: %s\n",response);
+		}
+		int should_delay=!message||!*message||round_ok||strstr(message,"Failed call ipaas purchase");
+		free(target_code); free(decoy_code); free(reason); free(response); free(status); free(message); free(err); err=NULL;
+		payment_quote_free(&quote[0]); payment_quote_free(&quote[1]);
+		if(settlement_attempted&&opts->delay_seconds&&should_delay){
+			printf("Waiting for %u seconds before next purchase...\n",opts->delay_seconds);
+			sleep(opts->delay_seconds);
+		}
+	}
+	printf("Purchase-by-family summary: family=%s requested=%zu processed=%d success=%d failed=%d\n",family_name,options.n-start_index,processed,success,failed);
+	if(successful.n){ puts("Successful purchases:"); for(size_t i=0;i<successful.n;i++) printf("%zu. %s\n",i+1,successful.v[i]); }
+	free_sl(&successful); ql_free(&options); free(family_name); tokens_free(&tokens); free(active); accounts_free(&accounts);
+	return failed?1:0;
+}
+static void parse_family_purchase_options(int argc,char **argv,FamilyPurchaseOptions *opts){
+	memset(opts,0,sizeof(*opts)); opts->start_option=1; opts->pause_on_success=1;
+	for(int i=0;i<argc;i++){
+		const char *arg=argv[i],*value=NULL;
+		if(!strcmp(arg,"--start-from-option")||!strcmp(arg,"--start")){ if(++i>=argc) die("missing value for %s",arg); value=argv[i]; long long parsed=0; if(parse_bounded_ll(value,1,INT_MAX,&parsed)) die("invalid start option: %s",value); opts->start_option=(int)parsed; }
+		else if(!strcmp(arg,"--delay")){ if(++i>=argc) die("missing value for --delay"); value=argv[i]; long long parsed=0; if(parse_bounded_ll(value,0,UINT_MAX,&parsed)) die("invalid delay: %s",value); opts->delay_seconds=(unsigned int)parsed; }
+		else if(!strcmp(arg,"--use-decoy")){ if(++i>=argc||parse_bool_strict(argv[i],&opts->use_decoy)) die("invalid use_decoy"); }
+		else if(!strcmp(arg,"--pause-on-success")){ if(++i>=argc||parse_bool_strict(argv[i],&opts->pause_on_success)) die("invalid pause_on_success"); }
+		else die("unknown purchase-by-family option: %s",arg);
+	}
+}
+static int cmd_purchase_by_family(int argc,char **argv){
+	if(argc<1) die("usage: engsel purchase-by-family <family_code> [--delay seconds] [--use-decoy y|n] [--start-from-option number] [--pause-on-success y|n]");
+	if(!family_code_ok(argv[0])) die("invalid family code");
+	FamilyPurchaseOptions opts; parse_family_purchase_options(argc-1,argv+1,&opts);
+	const char *missing=payment_config_missing(); if(missing) die("missing env %s",missing);
+	return family_purchase_run(argv[0],&opts);
+}
+static void interactive_purchase_by_family(void){
+	const char *missing=payment_config_missing();
+	if(missing){ printf("Missing env %s. Set di Settings dulu.\n",missing); pause_enter(); return; }
+	char family[160],input[64],answer[32]; long long parsed=0;
+	FamilyPurchaseOptions opts; memset(&opts,0,sizeof(opts)); opts.start_option=1; opts.pause_on_success=1;
+	printf("\033[H\033[J%s=======================================================%s\n",CC,C0);
+	printf("%sBeli Semua Paket dalam Family Code (Loop)%s\n",CB,C0);
+	printf("%s=======================================================%s\n",CC,C0);
+	prompt_line("Enter family code (or '99' to cancel): ",family,sizeof(family));
+	if(!strcmp(family,"99")) return;
+	if(!family_code_ok(family)) goto family_input_invalid;
+	prompt_line("Start purchasing from option number (default 1): ",input,sizeof(input));
+	if(input[0]){ if(parse_bounded_ll(input,1,INT_MAX,&parsed)) goto family_input_invalid; opts.start_option=(int)parsed; }
+	prompt_line("Use decoy package? (y/n): ",answer,sizeof(answer));
+	if(parse_bool_strict(answer,&opts.use_decoy)) goto family_input_invalid;
+	prompt_line("Pause on each successful purchase? (y/n): ",answer,sizeof(answer));
+	if(parse_bool_strict(answer,&opts.pause_on_success)) goto family_input_invalid;
+	prompt_line("Delay seconds between purchases (0 for no delay): ",input,sizeof(input));
+	if(parse_bounded_ll(input,0,UINT_MAX,&parsed)) goto family_input_invalid;
+	opts.delay_seconds=(unsigned int)parsed;
+	family_purchase_run(family,&opts);
+	pause_enter();
+	return;
+family_input_invalid:
+	puts("Input Beli Semua Paket dalam Family Code tidak valid.");
+	pause_enter();
 }
 static void cmd_transaction_history_human(void){ Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(cli_begin(&a,&act,&acc,&t)) exit(1); char *history=get_transaction_history_retry(&a,acc,&t); puts(history); free(history); tokens_free(&t); free(act); accounts_free(&a); }
 static void cmd_pending_transactions_human(void){ Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(cli_begin(&a,&act,&acc,&t)) exit(1); char *pending=get_pending_transactions_retry(&a,acc,&t); puts(pending); free(pending); tokens_free(&t); free(act); accounts_free(&a); }
@@ -993,15 +1573,26 @@ static void cmd_pay_human(const char *mode,int n,char **codes){
 	PaymentQuote q[4]; memset(q,0,sizeof(q));
 	long long total=0; int loaded=0;
 	for(int i=0;i<n;i++){
-		char *err=NULL;
-		if(payment_quote_load_retry(&a,acc,&t,codes[i],&q[i],&err)){
+		char *err=NULL; int refreshed=0;
+		if(payment_quote_load_retry_track(&a,acc,&t,codes[i],&q[i],&err,&refreshed)){
 			fprintf(stderr,"quote failed %s: %s\n",codes[i],err?err:"unknown");
 			free(err);
 			for(int j=0;j<loaded;j++) payment_quote_free(&q[j]);
 			tokens_free(&t); free(act); accounts_free(&a);
 			exit(1);
 		}
+		if(refreshed&&loaded>0){
+			long long reloaded_total=0;
+			if(payment_quotes_reload_current(&t,q,loaded,&reloaded_total,&err)){
+				fprintf(stderr,"prior quote reload failed after token refresh: %s\n",err?err:"unknown");
+				free(err); payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a); exit(1);
+			}
+			total=reloaded_total;
+		}
 		payment_quote_print_pretty(&q[i]);
+		if(q[i].price>LLONG_MAX-total){
+			fprintf(stderr,"quote total overflow\n"); payment_quote_free(&q[i]); for(int j=0;j<loaded;j++) payment_quote_free(&q[j]); tokens_free(&t); free(act); accounts_free(&a); exit(1);
+		}
 		total+=q[i].price;
 		loaded++;
 	}
@@ -1023,6 +1614,6 @@ static void cmd_pay_human(const char *mode,int n,char **codes){
 	for(int i=0;i<loaded;i++) payment_quote_free(&q[i]);
 	tokens_free(&t); free(act); accounts_free(&a);
 }
-static void interactive_main_menu(void){ for(;;){ Accounts a=accounts_load(); char *act=active_get(); Account *active=(act&&*act)?accounts_find(&a,act):NULL; printf("\033[H\033[J"); printf("%s=======================================================%s\n",CC,C0); if(active){ printf("%sNomor:%s %s | %sType:%s %s\n",CB,C0,active->number,CB,C0,active->subscription_type); Tokens t={0}; if(refresh_account(active,&t)==0){ account_sync(&a,active,&t); char *bal=get_balance_api(&t); long long remaining=balance_remaining(bal),exp=balance_expired_at(bal); char rp[64],dt[32]; if(remaining>=0) money_id(remaining,rp,sizeof(rp)); else snprintf(rp,sizeof(rp),"N/A"); date_str(exp,dt,sizeof(dt)); printf("%sPulsa:%s Rp %s | %sAktif sampai:%s %s\n",CB,C0,rp,CB,C0,dt); free(bal); tokens_free(&t); } else printf("%sPulsa:%s N/A | %sAktif sampai:%s N/A\n",CB,C0,CB,C0); } else printf("Belum ada akun aktif\n"); printf("%s=======================================================%s\nMenu:\n1. Login/Ganti akun\n2. Lihat Paket Saya\n3. Store Segments\n4. Store Packages\n5. Beli Paket Berdasarkan Family Code\n6. Point / Redeemables\n7. Pembelian Berulang\n99. Tutup aplikasi\n-------------------------------------------------------\n",CC,C0); char choice[32]; prompt_line("Pilih menu: ",choice,sizeof(choice)); if(!strcmp(choice,"1")){ free(act); accounts_free(&a); interactive_account_menu(); continue; } if(!strcmp(choice,"2")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { char num[32]; snprintf(num,sizeof(num),"%s",active->number); free(act); accounts_free(&a); interactive_quota(num); continue; } } else if(!strcmp(choice,"3")){ free(act); accounts_free(&a); interactive_store_segments(); continue; } else if(!strcmp(choice,"4")){ free(act); accounts_free(&a); interactive_store_packages(); continue; } else if(!strcmp(choice,"5")){ free(act); accounts_free(&a); interactive_store_family(); continue; } else if(!strcmp(choice,"6")){ free(act); accounts_free(&a); interactive_redeemables(""); continue; } else if(!strcmp(choice,"7")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { free(act); accounts_free(&a); interactive_repeat_purchase(); continue; } } else if(!strcmp(choice,"99")){ free(act); accounts_free(&a); puts("Exiting the application."); return; } else { puts("Invalid choice."); pause_enter(); } free(act); accounts_free(&a); } }
-static void usage(void){ puts("engsel                 # menu interaktif\nengsel login <628...>\nengsel otp <628...> <code>\nengsel accounts\nengsel use <628...>\nengsel del <628...>\nengsel logout\nengsel quota [628...]\nengsel segments [y|n]\nengsel point|redeemables [y|n]\nengsel history|transaction-history\nengsel pending|pending-transactions\nengsel transaction-status <id> [status]\nengsel pay-quote <package_code>\nengsel pay-pulsa <package_code> [--amount rupiah] BAYAR-<harga>\nengsel pay-balance|pay-qris|pay-ewallet [--amount rupiah] <package_code...>\nengsel pay-balance-decoy-standard [--amount rupiah] <option_code...>\nengsel pay-balance-decoy-v2 [--amount rupiah] <option_code...>\n  aliases: pay-decoy-standard; pay-decoy-v2; legacy pay-decoy/pay-balance-decoy -> V2\nengsel pay-point|pay-voucher|pay-gift <package_code>\nengsel purchase-n-times <family_code> <variant_code> <order> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel purchase-n-times-by-option-code <option_code> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel env\nengsel accounts-json\nengsel status-json|dashboard-json\nengsel quota-json [628...]\nengsel env-json|settings-json\nengsel json family <family_code>\nengsel json notifications\nengsel json notification-detail <id>\nengsel json notification-read-all <id...>\nengsel json payment balance-decoy-standard <option_code...> confirm=1\nengsel json payment balance-decoy-v2 <option_code...> confirm=1\n  JSON aliases: decoy-standard; decoy-v2; legacy balance-decoy/decoy/prio -> V2\nengsel json tiering|history|transaction-history|pending|transaction-status|payment-status|family-list|point|redeemables\nengsel json shop family-list [y|n]\nengsel json dashboard|status|accounts|quota|segments|payment|env|settings|login|otp|use|del|logout|reset-session|unsub"); }
-int main(int argc,char **argv){ load_config(); if(argc<2){ require_config(); interactive_main_menu(); return 0; } if(!strcmp(argv[1],"--version")||!strcmp(argv[1],"-V")||!strcmp(argv[1],"version")){ puts(ENGSEL_VERSION); return 0; } if(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h")||!strcmp(argv[1],"help")){ usage(); return 0; } if(!strcmp(argv[1],"login")&&argc==3){ require_config(); cmd_login(argv[2]); } else if(!strcmp(argv[1],"otp")&&argc==4){ require_config(); cmd_otp(argv[2],argv[3]); } else if(!strcmp(argv[1],"accounts")) cmd_accounts(); else if(!strcmp(argv[1],"accounts-json")) cmd_json_accounts(); else if(!strcmp(argv[1],"use")&&argc==3) cmd_use(argv[2]); else if(!strcmp(argv[1],"del")&&argc==3) cmd_del(argv[2]); else if(!strcmp(argv[1],"logout")||!strcmp(argv[1],"reset-session")) cmd_logout(); else if(!strcmp(argv[1],"quota")){ require_config(); cmd_quota(argc>=3?argv[2]:NULL); } else if(!strcmp(argv[1],"quota-json")){ if(json_require_config()) return 1; cmd_json_quota(argc>=3?argv[2]:NULL,argc>=4&&!strcmp(argv[3],"fresh")); } else if(!strcmp(argv[1],"segments")||!strcmp(argv[1],"store-segments")){ require_config(); cmd_segments(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"point")||!strcmp(argv[1],"redeemables")){ require_config(); interactive_redeemables(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"shop")||!strcmp(argv[1],"store-packages")){ require_config(); cmd_shop(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"history")||!strcmp(argv[1],"transaction-history")){ require_config(); cmd_transaction_history_human(); } else if(!strcmp(argv[1],"pending")||!strcmp(argv[1],"pending-transactions")){ require_config(); cmd_pending_transactions_human(); } else if(!strcmp(argv[1],"transaction-status")||!strcmp(argv[1],"status-transaction")||!strcmp(argv[1],"payment-status")){ require_config(); cmd_transaction_status_human(argc>=3?argv[2]:NULL,argc>=4?argv[3]:""); } else if(!strcmp(argv[1],"pay-quote")&&argc>=3){ require_config(); cmd_pay_quote(argv[2]); } else if(!strcmp(argv[1],"pay-pulsa")&&argc>=3){ require_config(); int pay_argc=argc-2; char **pay_argv=argv+2; long long custom_amount=-1; if(strip_custom_amount_args(&pay_argc,pay_argv,&custom_amount)) die("invalid custom amount"); if(pay_argc<1) die("missing package code"); cmd_pay_pulsa(pay_argv[0],pay_argc>=2?pay_argv[1]:NULL,custom_amount); } else if(!strcmp(argv[1],"pay-balance")||!strcmp(argv[1],"pay-auto")){ require_config(); cmd_pay_human("balance",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-standard")||!strcmp(argv[1],"pay-decoy-standard")){ require_config(); cmd_pay_human("decoy-standard",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-v2")||!strcmp(argv[1],"pay-decoy-v2")||!strcmp(argv[1],"pay-decoy")||!strcmp(argv[1],"pay-balance-decoy")){ require_config(); cmd_pay_human("decoy-v2",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-qris")){ require_config(); cmd_pay_human("qris",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-ewallet")){ require_config(); cmd_pay_human("ewallet",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-point")){ require_config(); cmd_pay_human("point",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-voucher")){ require_config(); cmd_pay_human("voucher",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-gift")){ require_config(); cmd_pay_human("gift",argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times")){ require_config(); return cmd_purchase_n_times(argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times-by-option-code")){ require_config(); return cmd_purchase_n_times_by_option_code(argc-2,argv+2); } else if(!strcmp(argv[1],"status-json")||!strcmp(argv[1],"dashboard-json")){ if(json_require_config()) return 1; cmd_json_dashboard(); } else if(!strcmp(argv[1],"env")) cmd_env(); else if(!strcmp(argv[1],"env-json")||!strcmp(argv[1],"settings-json")) cmd_json_env(); else if(!strcmp(argv[1],"json")) cmd_json(argc-2,argv+2); else { usage(); return 1; } return 0; }
+static void interactive_main_menu(void){ for(;;){ Accounts a=accounts_load(); char *act=active_get(); Account *active=(act&&*act)?accounts_find(&a,act):NULL; printf("\033[H\033[J"); printf("%s=======================================================%s\n",CC,C0); if(active){ printf("%sNomor:%s %s | %sType:%s %s\n",CB,C0,active->number,CB,C0,active->subscription_type); Tokens t={0}; if(refresh_account(active,&t)==0){ account_sync(&a,active,&t); char *bal=get_balance_api(&t); long long remaining=balance_remaining(bal),exp=balance_expired_at(bal); char rp[64],dt[32]; if(remaining>=0) money_id(remaining,rp,sizeof(rp)); else snprintf(rp,sizeof(rp),"N/A"); date_str(exp,dt,sizeof(dt)); printf("%sPulsa:%s Rp %s | %sAktif sampai:%s %s\n",CB,C0,rp,CB,C0,dt); free(bal); tokens_free(&t); } else printf("%sPulsa:%s N/A | %sAktif sampai:%s N/A\n",CB,C0,CB,C0); } else printf("Belum ada akun aktif\n"); printf("%s=======================================================%s\nMenu:\n1. Login/Ganti akun\n2. Lihat Paket Saya\n3. Store Segments\n4. Store Packages\n5. Beli Paket Berdasarkan Family Code\n6. Point / Redeemables\n7. Beli Semua Paket dalam Family Code (Loop)\n99. Tutup aplikasi\n-------------------------------------------------------\n",CC,C0); char choice[32]; prompt_line("Pilih menu: ",choice,sizeof(choice)); if(!strcmp(choice,"1")){ free(act); accounts_free(&a); interactive_account_menu(); continue; } if(!strcmp(choice,"2")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { char num[32]; snprintf(num,sizeof(num),"%s",active->number); free(act); accounts_free(&a); interactive_quota(num); continue; } } else if(!strcmp(choice,"3")){ free(act); accounts_free(&a); interactive_store_segments(); continue; } else if(!strcmp(choice,"4")){ free(act); accounts_free(&a); interactive_store_packages(); continue; } else if(!strcmp(choice,"5")){ free(act); accounts_free(&a); interactive_store_family(); continue; } else if(!strcmp(choice,"6")){ free(act); accounts_free(&a); interactive_redeemables(""); continue; } else if(!strcmp(choice,"7")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { free(act); accounts_free(&a); interactive_purchase_by_family(); continue; } } else if(!strcmp(choice,"99")){ free(act); accounts_free(&a); puts("Exiting the application."); return; } else { puts("Invalid choice."); pause_enter(); } free(act); accounts_free(&a); } }
+static void usage(void){ puts("engsel                 # menu interaktif\nengsel login <628...>\nengsel otp <628...> <code>\nengsel accounts\nengsel use <628...>\nengsel del <628...>\nengsel logout\nengsel quota [628...]\nengsel segments [y|n]\nengsel point|redeemables [y|n]\nengsel history|transaction-history\nengsel pending|pending-transactions\nengsel transaction-status <id> [status]\nengsel pay-quote <package_code>\nengsel pay-pulsa <package_code> [--amount rupiah] BAYAR-<harga>\nengsel pay-balance|pay-qris|pay-ewallet [--amount rupiah] <package_code...>\nengsel pay-balance-decoy-standard [--amount rupiah] <option_code...>\nengsel pay-balance-decoy-v2 [--amount rupiah] <option_code...>\n  aliases: pay-decoy-standard; pay-decoy-v2; legacy pay-decoy/pay-balance-decoy -> V2\nengsel pay-point|pay-voucher|pay-gift <package_code>\nengsel purchase-n-times <family_code> <variant_code> <order> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel purchase-n-times-by-option-code <option_code> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel purchase-by-family <family_code> [--delay seconds] [--use-decoy y|n] [--start-from-option number] [--pause-on-success y|n]\nengsel env\nengsel accounts-json\nengsel status-json|dashboard-json\nengsel quota-json [628...]\nengsel env-json|settings-json\nengsel json family <family_code>\nengsel json notifications\nengsel json notification-detail <id>\nengsel json notification-read-all <id...>\nengsel json payment balance-decoy-standard <option_code...> confirm=1\nengsel json payment balance-decoy-v2 <option_code...> confirm=1\n  JSON aliases: decoy-standard; decoy-v2; legacy balance-decoy/decoy/prio -> V2\nengsel json tiering|history|transaction-history|pending|transaction-status|payment-status|family-list|point|redeemables\nengsel json shop family-list [y|n]\nengsel json dashboard|status|accounts|quota|segments|payment|env|settings|login|otp|use|del|logout|reset-session|unsub"); }
+int main(int argc,char **argv){ load_config(); if(argc<2){ require_config(); interactive_main_menu(); return 0; } if(!strcmp(argv[1],"--version")||!strcmp(argv[1],"-V")||!strcmp(argv[1],"version")){ puts(ENGSEL_VERSION); return 0; } if(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h")||!strcmp(argv[1],"help")){ usage(); return 0; } if(!strcmp(argv[1],"login")&&argc==3){ require_config(); cmd_login(argv[2]); } else if(!strcmp(argv[1],"otp")&&argc==4){ require_config(); cmd_otp(argv[2],argv[3]); } else if(!strcmp(argv[1],"accounts")) cmd_accounts(); else if(!strcmp(argv[1],"accounts-json")) cmd_json_accounts(); else if(!strcmp(argv[1],"use")&&argc==3) cmd_use(argv[2]); else if(!strcmp(argv[1],"del")&&argc==3) cmd_del(argv[2]); else if(!strcmp(argv[1],"logout")||!strcmp(argv[1],"reset-session")) cmd_logout(); else if(!strcmp(argv[1],"quota")){ require_config(); cmd_quota(argc>=3?argv[2]:NULL); } else if(!strcmp(argv[1],"quota-json")){ if(json_require_config()) return 1; cmd_json_quota(argc>=3?argv[2]:NULL,argc>=4&&!strcmp(argv[3],"fresh")); } else if(!strcmp(argv[1],"segments")||!strcmp(argv[1],"store-segments")){ require_config(); cmd_segments(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"point")||!strcmp(argv[1],"redeemables")){ require_config(); interactive_redeemables(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"shop")||!strcmp(argv[1],"store-packages")){ require_config(); cmd_shop(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"history")||!strcmp(argv[1],"transaction-history")){ require_config(); cmd_transaction_history_human(); } else if(!strcmp(argv[1],"pending")||!strcmp(argv[1],"pending-transactions")){ require_config(); cmd_pending_transactions_human(); } else if(!strcmp(argv[1],"transaction-status")||!strcmp(argv[1],"status-transaction")||!strcmp(argv[1],"payment-status")){ require_config(); cmd_transaction_status_human(argc>=3?argv[2]:NULL,argc>=4?argv[3]:""); } else if(!strcmp(argv[1],"pay-quote")&&argc>=3){ require_config(); cmd_pay_quote(argv[2]); } else if(!strcmp(argv[1],"pay-pulsa")&&argc>=3){ require_config(); int pay_argc=argc-2; char **pay_argv=argv+2; long long custom_amount=-1; if(strip_custom_amount_args(&pay_argc,pay_argv,&custom_amount)) die("invalid custom amount"); if(pay_argc<1) die("missing package code"); cmd_pay_pulsa(pay_argv[0],pay_argc>=2?pay_argv[1]:NULL,custom_amount); } else if(!strcmp(argv[1],"pay-balance")||!strcmp(argv[1],"pay-auto")){ require_config(); cmd_pay_human("balance",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-standard")||!strcmp(argv[1],"pay-decoy-standard")){ require_config(); cmd_pay_human("decoy-standard",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-v2")||!strcmp(argv[1],"pay-decoy-v2")||!strcmp(argv[1],"pay-decoy")||!strcmp(argv[1],"pay-balance-decoy")){ require_config(); cmd_pay_human("decoy-v2",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-qris")){ require_config(); cmd_pay_human("qris",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-ewallet")){ require_config(); cmd_pay_human("ewallet",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-point")){ require_config(); cmd_pay_human("point",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-voucher")){ require_config(); cmd_pay_human("voucher",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-gift")){ require_config(); cmd_pay_human("gift",argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times")){ require_config(); return cmd_purchase_n_times(argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times-by-option-code")){ require_config(); return cmd_purchase_n_times_by_option_code(argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-by-family")){ require_config(); return cmd_purchase_by_family(argc-2,argv+2); } else if(!strcmp(argv[1],"status-json")||!strcmp(argv[1],"dashboard-json")){ if(json_require_config()) return 1; cmd_json_dashboard(); } else if(!strcmp(argv[1],"env")) cmd_env(); else if(!strcmp(argv[1],"env-json")||!strcmp(argv[1],"settings-json")) cmd_json_env(); else if(!strcmp(argv[1],"json")) cmd_json(argc-2,argv+2); else { usage(); return 1; } return 0; }
