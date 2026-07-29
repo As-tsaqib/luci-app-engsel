@@ -362,13 +362,136 @@ function quotaSnapshot(data) {
 	return snapshots[Math.min(quotaSnapshotIndex(), Math.max(0, snapshots.length - 1))] || null;
 }
 
-function quotaPayload(entry) {
-	let payload = entry && entry.quota || {};
+function quotaResponsePayload(response) {
+	let payload = response && response.quota ? response.quota : response || {};
 	if (payload.response)
 		payload = payload.response;
 	if (payload.data)
 		payload = payload.data;
 	return payload && typeof payload === 'object' ? payload : {};
+}
+
+function quotaPayload(entry) {
+	return quotaResponsePayload(entry && entry.quota);
+}
+
+function compactQuotaResponse(response) {
+	const payload = quotaResponsePayload(response);
+	const packages = Array.isArray(payload.quotas) ? payload.quotas : [];
+	return {
+		quotas: packages.map((packageItem) => ({
+			name: packageItem.name || '',
+			group_name: packageItem.group_name || '',
+			product_domain: packageItem.product_domain || packageItem.domain || '',
+			product_subscription_type: packageItem.product_subscription_type || packageItem.subtype || '',
+			parent_code: packageItem.parent_code || '',
+			is_addon: packageItem.is_addon === true,
+			benefits: (Array.isArray(packageItem.benefits) ? packageItem.benefits : []).map((benefit) => ({
+				name: benefit.name || '',
+				information: benefit.information || '',
+				data_type: benefit.data_type || '',
+				total: Number(benefit.total || 0),
+				remaining: Number(benefit.remaining || 0),
+				is_unlimited: benefit.is_unlimited === true,
+				benefit_type: benefit.benefit_type || '',
+				benefit_category: benefit.benefit_category || ''
+			}))
+		}))
+	};
+}
+
+function quotaResponseOk(response) {
+	const payload = quotaResponsePayload(response);
+	const status = String(response && response.status || payload.status || '').toUpperCase();
+	const code = String(response && response.code || payload.code || '').toUpperCase();
+	const success = status === 'SUCCESS' || code === '000' || (!status && !code && response && response.ok === true);
+	return !!response && response.ok !== false && success && Array.isArray(payload.quotas);
+}
+
+function saveQuotaSnapshot(snapshot) {
+	const current = readQuotaSnapshot();
+	const previous = quotaSnapshots(current);
+	const history = {
+		schema_version: 1,
+		snapshots: [ snapshot ].concat(previous).slice(0, 20)
+	};
+	const text = JSON.stringify(history);
+	try {
+		localStorage.setItem(QUOTA_HISTORY_KEY, text);
+		try {
+			sessionStorage.removeItem(QUOTA_HISTORY_KEY);
+		} catch (err) {}
+		return true;
+	} catch (err) {
+		try {
+			sessionStorage.setItem(QUOTA_HISTORY_KEY, text);
+			return true;
+		} catch (sessionError) {
+			return false;
+		}
+	}
+}
+
+function recheckAllQuota(button) {
+	button.disabled = true;
+	button.textContent = _('Loading accounts...');
+	return callEngsel([ 'json', 'accounts' ]).then((accountsResult) => {
+		const accounts = accountsResult && Array.isArray(accountsResult.accounts) ? accountsResult.accounts : [];
+		if (!accounts.length) {
+			button.disabled = false;
+			button.textContent = _('Recheck');
+			ui.addNotification(null, E('p', {}, accountsResult && (accountsResult.error || accountsResult.message) || _('No registered number found.')), 'warning');
+			return;
+		}
+		const snapshot = {
+			schema_version: 1,
+			checked_at: Math.floor(Date.now() / 1000),
+			ok: false,
+			complete: false,
+			total_accounts: accounts.length,
+			succeeded: 0,
+			failed: 0,
+			accounts: []
+		};
+		let chain = Promise.resolve();
+		accounts.forEach((account, index) => {
+			chain = chain.then(() => {
+				button.textContent = _('Checking %d/%d...').format(index + 1, accounts.length);
+				return callEngsel([ 'json', 'quota', account.number, 'fresh' ]).then((response) => {
+					const ok = quotaResponseOk(response);
+					const entry = {
+						number: account.number,
+						subscription_type: account.subscription_type || '',
+						ok: ok
+					};
+					if (ok) {
+						entry.quota = compactQuotaResponse(response);
+						snapshot.succeeded++;
+					} else {
+						entry.error = response && (response.error || response.message || response.code) || _('Quota check failed.');
+						snapshot.failed++;
+					}
+					snapshot.accounts.push(entry);
+				});
+			});
+		});
+		return chain.then(() => {
+			button.disabled = false;
+			button.textContent = _('Recheck');
+			snapshot.ok = snapshot.succeeded > 0;
+			snapshot.complete = snapshot.failed === 0;
+			if (!snapshot.ok) {
+				ui.addNotification(null, E('p', {}, _('Recheck failed for every number. Previous history was kept.')), 'warning');
+				return;
+			}
+			if (!saveQuotaSnapshot(snapshot)) {
+				ui.addNotification(null, E('p', {}, _('Quota result is too large to save in this browser. Previous history was kept.')), 'warning');
+				return;
+			}
+			ui.addNotification(null, E('p', {}, _('%d number checked, %d failed.').format(snapshot.succeeded, snapshot.failed)), snapshot.failed ? 'warning' : 'info');
+			window.location.href = window.location.pathname + window.location.search;
+		});
+	});
 }
 
 function formatBytes(value) {
@@ -529,6 +652,10 @@ function quotaHistoryPage(data) {
 	const totals = sumQuotaBenefits([].concat.apply([], successful.map(accountQuotaBenefits)));
 	const succeeded = snapshot.succeeded != null ? Number(snapshot.succeeded) : successful.length;
 	const failed = snapshot.failed != null ? Number(snapshot.failed) : Math.max(0, accounts.length - succeeded);
+	const recheck = E('button', {
+		'class': 'btn cbi-button cbi-button-apply',
+		'click': () => recheckAllQuota(recheck)
+	}, _('Recheck'));
 	return E('div', { 'class': 'cbi-map' }, [
 		E('div', { 'style': 'display:flex;justify-content:space-between;gap:1em;align-items:center;flex-wrap:wrap' }, [
 			E('div', {}, [
@@ -546,7 +673,7 @@ function quotaHistoryPage(data) {
 					'value': String(index),
 					'selected': index === quotaSnapshotIndex()
 				}, item.checked_at ? formatDate(item.checked_at) : _('Snapshot %d').format(index + 1)))) : '',
-				E('button', { 'class': 'btn cbi-button cbi-button-reload', 'click': () => window.location.reload() }, _('Refresh'))
+				recheck
 			])
 		]),
 		E('div', { 'class': 'cbi-section', 'style': 'margin-top:1em;padding:clamp(1em,4vw,1.5em);border:1px solid transparent;border-radius:8px;background:' + SOFT_BORDER }, [
@@ -567,7 +694,8 @@ function quotaHistoryPage(data) {
 		]),
 		failed ? E('div', { 'class': 'alert-message warning', 'style': 'margin-top:1em' }, _('Some numbers could not be checked. Their session may need a new OTP.')) : '',
 		E('h3', { 'style': 'margin:1.25em 0 .25em' }, _('Detail per Nomor')),
-		...accounts.map(quotaAccountCard)
+		...accounts.map(quotaAccountCard),
+		E('button', { 'class': 'btn cbi-button cbi-button-reload', 'style': 'margin-top:1em', 'click': () => window.location.reload() }, _('Refresh'))
 	]);
 }
 
