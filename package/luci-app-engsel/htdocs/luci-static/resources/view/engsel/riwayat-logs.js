@@ -583,6 +583,13 @@ function quotaProgress(summary, height) {
 	}, cells);
 }
 
+function quotaSummaryBar(summary) {
+	const percent = quotaPercent(summary.remaining, summary.total);
+	const width = percent ? Math.max(3, percent) : 0;
+	return E('div', { 'style': 'height:16px;border-radius:999px;background:' + SOFT_TRACK + ';overflow:hidden' },
+		E('div', { 'style': 'height:100%;width:' + width + '%;border-radius:999px;background:linear-gradient(90deg,#0ea5e9,#16c784)' }));
+}
+
 function quotaBenefitRow(item) {
 	const summary = { remaining: item.remaining, total: item.total };
 	return E('div', { 'style': 'padding:.75em 0;border-top:1px solid ' + SOFT_LINE }, [
@@ -632,7 +639,7 @@ function quotaAccountCard(entry) {
 				E('div', { 'style': 'margin-top:.15em;color:inherit;opacity:.58;font-size:.88em' }, _('%d%% remaining').format(quotaPercent(summary.remaining, summary.total)))
 			])
 		]),
-		benefits.length ? E('div', { 'style': 'margin-top:.7em' }, quotaProgress(summary, '13px')) : '',
+		benefits.length ? E('div', { 'style': 'margin-top:.7em' }, quotaSummaryBar(summary)) : '',
 		benefits.length ? quotaGroup(_('Kuota Utama'), main) : E('div', { 'class': 'alert-message warning', 'style': 'margin-top:.8em' }, _('No data quota detail found.')),
 		quotaGroup(_('Kuota Aplikasi / Add-on'), addons)
 	]);
