@@ -723,7 +723,7 @@ function readPaymentLogs() {
 
 function paymentModeLabel(value) {
 	if (value === 'balance-decoy-standard' || value === 'decoy-standard')
-		return _('Balance + Decoy Standard');
+		return _('Balance + Decoy');
 	if (value === 'balance-decoy-v2' || value === 'decoy-v2' || value === 'balance-decoy' || value === 'decoy' || value === 'prio')
 		return _('Balance + Decoy V2');
 	return value;

@@ -15,7 +15,7 @@ const BUY_STYLE = 'background:#003b95;border-color:#003b95;color:#fff';
 const ACTION_ROW_STYLE = 'display:flex;gap:.45em;flex-wrap:wrap;margin-top:.65em';
 const PAYMENT_MODES = [
 	{ value: 'balance', label: _('Balance'), command: 'balance' },
-	{ value: 'balance-decoy-standard', label: _('Balance + Decoy Standard'), command: 'balance-decoy-standard' },
+	{ value: 'balance-decoy-standard', label: _('Balance + Decoy'), command: 'balance-decoy-standard' },
 	{ value: 'balance-decoy-v2', label: _('Balance + Decoy V2'), command: 'balance-decoy-v2' },
 	{ value: 'qris', label: _('QRIS'), command: 'qris' },
 	{ value: 'dana', label: _('DANA'), command: 'dana', ewallet: true, wallet: true },

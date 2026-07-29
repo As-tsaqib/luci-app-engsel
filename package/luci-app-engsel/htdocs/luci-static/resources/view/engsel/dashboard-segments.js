@@ -12,7 +12,7 @@ const PAYMENT_LOG_KEY = 'engsel.payment.logs.v1';
 const QUOTA_HISTORY_KEY = 'engsel.quota.history.v1';
 const PAYMENT_MODES = [
 	{ value: 'balance', label: _('Balance'), command: 'balance' },
-	{ value: 'balance-decoy-standard', label: _('Balance + Decoy Standard'), command: 'balance-decoy-standard' },
+	{ value: 'balance-decoy-standard', label: _('Balance + Decoy'), command: 'balance-decoy-standard' },
 	{ value: 'balance-decoy-v2', label: _('Balance + Decoy V2'), command: 'balance-decoy-v2' },
 	{ value: 'qris', label: _('QRIS'), command: 'qris' },
 	{ value: 'dana', label: _('DANA'), command: 'dana', ewallet: true, wallet: true },

@@ -36,7 +36,7 @@ return view.extend({
 		s = m.section(form.NamedSection, 'config', 'engsel');
 		s.anonymous = true;
 		s.tab('env', _('Environment'), ENV_WARNING);
-		s.tab('decoy', _('Decoy'), _('Optional package option code overrides shared by Balance + Decoy Standard and V2. Leave blank unless auto-detect fails.'));
+		s.tab('decoy', _('Decoy'), _('Optional package option code overrides shared by Balance + Decoy and Balance + Decoy V2. Leave blank unless auto-detect fails.'));
 
 		ENV_OPTIONS.forEach((item) => {
 			o = s.taboption('env', form.Value, item[0], item[1]);

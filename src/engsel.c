@@ -31,7 +31,8 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-#define ENGSEL_VERSION "1.0.0-r5"
+#define ENGSEL_VERSION "1.0.0-r6"
+#define DECOY_V2_PAYMENT_FOR "\xF0\x9F\xA4\xAB"
 #define TOKEN_CACHE_TTL_SEC 240
 #define HTTP_RESPONSE_MAX (2U * 1024U * 1024U)
 #define RESPONSE_CACHE_MAX (1U * 1024U * 1024U)
@@ -527,12 +528,12 @@ static void cmd_json_payment_decoy_mode(const char *mode,int standard,int n,char
 	free(decoy); total+=q[loaded].price; loaded++;
 	long long amount=payment_amount(total,custom_amount);
 	int token_idx=standard?0:loaded-1;
-	const char *payment_for_override=standard?NULL:"";
+	const char *payment_for_override=standard?NULL:DECOY_V2_PAYMENT_FOR;
 	char *first=NULL,*resp=payment_pulsa_settle_retry(acc,&t,q,loaded,&amount,token_idx,payment_for_override,&first);
 	char *status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message");
 	int ok=payment_ok_status(status);
 	printf("{\"ok\":%s,\"payment\":\"balance\",\"mode\":",ok?"true":"false"); json_str(mode);
-	printf(",\"token_confirmation_idx\":%d,\"payment_for\":",token_idx); json_str(standard?q[0].payment_for:"");
+	printf(",\"token_confirmation_idx\":%d,\"payment_for\":",token_idx); json_str(standard?q[0].payment_for:DECOY_V2_PAYMENT_FOR);
 	printf(",\"message\":"); json_str(msg?msg:(status?status:"unknown")); printf(","); print_quotes_json(q,loaded); print_amount_json(total,amount);
 	printf(",\"response\":"); json_val(resp); if(first){ printf(",\"first_response\":"); json_val(first); } printf("}\n");
 	free(first); free(status); free(msg); free(resp); for(int i=0;i<loaded;i++) payment_quote_free(&q[i]); tokens_free(&t); free(act); accounts_free(&a);
@@ -661,7 +662,7 @@ static int interactive_payment_ewallet_quotes(Accounts *a,Account *acc,Tokens *t
 static int interactive_payment_special_quote(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,const char *mode);
 static const char *family_icon(const char *family){ static char out[12]; if(!family) return "[PKG]"; char b[256]; size_t n=strlen(family); if(n>=sizeof(b)) n=sizeof(b)-1; for(size_t i=0;i<n;i++) b[i]=(char)toupper((unsigned char)family[i]); b[n]=0; if(strstr(b,"HOT")) return "[HOT]"; if(strstr(b,"GAME")) return "[GM]"; if(strstr(b,"VIDEO")||strstr(b,"VIDIO")||strstr(b,"YOUTUBE")||strstr(b,"TIKTOK")) return "[VID]"; if(strstr(b,"AKRAB")||strstr(b,"FAMILY")) return "[AK]"; if(strstr(b,"VOICE")||strstr(b,"NELPON")||strstr(b,"CALL")) return "[CALL]"; if(strstr(b,"SMS")||strstr(b,"TEXT")) return "[SMS]"; if(strstr(b,"UNLIMITED")) return "[UL]"; if(strstr(b,"COMBO")||strstr(b,"DATA")||strstr(b,"KUOTA")) return "[DATA]"; char abbr[5]={0}; int k=0,new_word=1; for(size_t i=0;b[i]&&k<4;i++){ if(isalnum((unsigned char)b[i])&&new_word){ abbr[k++]=b[i]; new_word=0; } else if(!isalnum((unsigned char)b[i])) new_word=1; } if(!abbr[0]) snprintf(out,sizeof(out),"[PKG]"); else snprintf(out,sizeof(out),"[%s]",abbr); return out; }
 static char *first_json_string(const char *json,const char **keys,size_t n){ for(size_t i=0;i<n;i++){ char *v=json_get_string(json,keys[i]); if(v&&*v) return v; free(v); } return NULL; }
-static void show_package_detail_cli(Accounts *a,Account *acc,Tokens *t,const char *option_code,CartItem cart[3],int *cart_n){ char *detail=get_package_detail_retry(a,acc,t,option_code); if(!package_detail_valid(detail)){ printf("Gagal load detail: %s\n",detail); free(detail); pause_enter(); return; } char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail); char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}"); char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}"); char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}"); char *fname=json_get_string(family,"name"),*vname=json_get_string(variant,"name"),*oname=json_get_string(option,"name"),*validity=json_get_string(option,"validity"),*payfor=json_get_string(family,"payment_for"),*plan=json_get_string(family,"plan_type"); long long price=json_get_ll_any(option,"price",0),point=json_get_ll_any(option,"point",0); char pricebuf[64]; money_id(price,pricebuf,sizeof(pricebuf)); int redeem=payfor&&!strcmp(payfor,"REDEEM_VOUCHER"); printf("\033[H\033[J%s=======================================================%s\n",CC,C0); printf("%sDetail Paket%s\n",CB,C0); printf("%s=======================================================%s\n",CC,C0); printf("Nama       : %s%s%s%s%s%s%s\n",fname?fname:"",vname&&*vname?" - ":"",vname?vname:"",oname&&*oname?" - ":"",oname?oname:"",C0,""); printf("Harga      : Rp %s\nMasa Aktif : %s\nPoint      : %lld\nPayment For: %s\nPlan Type  : %s\n",pricebuf,validity?validity:"-",point,payfor?payfor:"-",plan?plan:"-"); printf("%s-------------------------------------------------------%s\nKuota Detail\n",CL,C0); const char *bs,*be; if(!json_array_span(option,"benefits",&bs,&be)){ const char *bp=bs; while(bp<be){ char *ben=next_object(&bp,be); if(!ben) break; char *bn=json_get_string(ben,"name"),*dt=json_get_string(ben,"data_type"); long long total=json_get_ll_any(ben,"total",0),unlim=json_get_ll_any(ben,"is_unlimited",0); char q[64]; if(unlim) snprintf(q,sizeof(q),"Unlimited"); else quota_value_str(dt?dt:"DATA",total,q,sizeof(q)); printf("- %-32s %12s\n",bn?bn:"Benefit",q); free(bn); free(dt); free(ben); } } else puts("Tidak ada detail kuota."); printf("%s-------------------------------------------------------%s\nCart: %d/3\n",CL,C0,*cart_n); char ch[16]; prompt_line(redeem?"a cart, b pulsa, s balance+decoy standard, x balance+decoy v2, q qris, e e-wallet, p point, v voucher/bonus, g kirim bonus, Enter kembali: ":"a cart, b pulsa, s balance+decoy standard, x balance+decoy v2, q qris, e e-wallet, Enter kembali: ",ch,sizeof(ch)); if((ch[0]=='a'||ch[0]=='A')){ if(*cart_n>=3) puts("Cart penuh. Max 3 paket."); else { snprintf(cart[*cart_n].code,sizeof(cart[*cart_n].code),"%s",option_code); snprintf(cart[*cart_n].name,sizeof(cart[*cart_n].name),"%s%s%s",vname?vname:"",(vname&&oname)?" ":"",oname?oname:option_code); cart[*cart_n].price=price; (*cart_n)++; puts("Masuk cart."); } pause_enter(); } else if(ch[0]=='b'||ch[0]=='B') interactive_payment_pulsa(a,acc,t,option_code); else if(ch[0]=='s'||ch[0]=='S') interactive_payment_decoy(a,acc,t,option_code,1); else if(ch[0]=='x'||ch[0]=='X') interactive_payment_decoy(a,acc,t,option_code,0); else if(ch[0]=='q'||ch[0]=='Q') interactive_payment_qris(a,acc,t,option_code); else if(ch[0]=='e'||ch[0]=='E') interactive_payment_ewallet(a,acc,t,option_code); else if(redeem&&(ch[0]=='p'||ch[0]=='P')) interactive_payment_special(a,acc,t,option_code,"point"); else if(redeem&&(ch[0]=='v'||ch[0]=='V')) interactive_payment_special(a,acc,t,option_code,"voucher"); else if(redeem&&(ch[0]=='g'||ch[0]=='G')) interactive_payment_special(a,acc,t,option_code,"gift"); free(detail); free(data); free(option); free(family); free(variant); free(fname); free(vname); free(oname); free(validity); free(payfor); free(plan); }
+static void show_package_detail_cli(Accounts *a,Account *acc,Tokens *t,const char *option_code,CartItem cart[3],int *cart_n){ char *detail=get_package_detail_retry(a,acc,t,option_code); if(!package_detail_valid(detail)){ printf("Gagal load detail: %s\n",detail); free(detail); pause_enter(); return; } char *data=json_object_dup(detail,"data"); if(!data) data=xstrdup(detail); char *option=json_object_dup(data,"package_option"); if(!option) option=xstrdup("{}"); char *family=json_object_dup(data,"package_family"); if(!family) family=xstrdup("{}"); char *variant=json_object_dup(data,"package_detail_variant"); if(!variant) variant=xstrdup("{}"); char *fname=json_get_string(family,"name"),*vname=json_get_string(variant,"name"),*oname=json_get_string(option,"name"),*validity=json_get_string(option,"validity"),*payfor=json_get_string(family,"payment_for"),*plan=json_get_string(family,"plan_type"); long long price=json_get_ll_any(option,"price",0),point=json_get_ll_any(option,"point",0); char pricebuf[64]; money_id(price,pricebuf,sizeof(pricebuf)); int redeem=payfor&&!strcmp(payfor,"REDEEM_VOUCHER"); printf("\033[H\033[J%s=======================================================%s\n",CC,C0); printf("%sDetail Paket%s\n",CB,C0); printf("%s=======================================================%s\n",CC,C0); printf("Nama       : %s%s%s%s%s%s%s\n",fname?fname:"",vname&&*vname?" - ":"",vname?vname:"",oname&&*oname?" - ":"",oname?oname:"",C0,""); printf("Harga      : Rp %s\nMasa Aktif : %s\nPoint      : %lld\nPayment For: %s\nPlan Type  : %s\n",pricebuf,validity?validity:"-",point,payfor?payfor:"-",plan?plan:"-"); printf("%s-------------------------------------------------------%s\nKuota Detail\n",CL,C0); const char *bs,*be; if(!json_array_span(option,"benefits",&bs,&be)){ const char *bp=bs; while(bp<be){ char *ben=next_object(&bp,be); if(!ben) break; char *bn=json_get_string(ben,"name"),*dt=json_get_string(ben,"data_type"); long long total=json_get_ll_any(ben,"total",0),unlim=json_get_ll_any(ben,"is_unlimited",0); char q[64]; if(unlim) snprintf(q,sizeof(q),"Unlimited"); else quota_value_str(dt?dt:"DATA",total,q,sizeof(q)); printf("- %-32s %12s\n",bn?bn:"Benefit",q); free(bn); free(dt); free(ben); } } else puts("Tidak ada detail kuota."); printf("%s-------------------------------------------------------%s\nCart: %d/3\n",CL,C0,*cart_n); char ch[16]; prompt_line(redeem?"a cart, b pulsa, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, p point, v voucher/bonus, g kirim bonus, Enter kembali: ":"a cart, b pulsa, s Balance + Decoy, x Balance + Decoy V2, q qris, e e-wallet, Enter kembali: ",ch,sizeof(ch)); if((ch[0]=='a'||ch[0]=='A')){ if(*cart_n>=3) puts("Cart penuh. Max 3 paket."); else { snprintf(cart[*cart_n].code,sizeof(cart[*cart_n].code),"%s",option_code); snprintf(cart[*cart_n].name,sizeof(cart[*cart_n].name),"%s%s%s",vname?vname:"",(vname&&oname)?" ":"",oname?oname:option_code); cart[*cart_n].price=price; (*cart_n)++; puts("Masuk cart."); } pause_enter(); } else if(ch[0]=='b'||ch[0]=='B') interactive_payment_pulsa(a,acc,t,option_code); else if(ch[0]=='s'||ch[0]=='S') interactive_payment_decoy(a,acc,t,option_code,1); else if(ch[0]=='x'||ch[0]=='X') interactive_payment_decoy(a,acc,t,option_code,0); else if(ch[0]=='q'||ch[0]=='Q') interactive_payment_qris(a,acc,t,option_code); else if(ch[0]=='e'||ch[0]=='E') interactive_payment_ewallet(a,acc,t,option_code); else if(redeem&&(ch[0]=='p'||ch[0]=='P')) interactive_payment_special(a,acc,t,option_code,"point"); else if(redeem&&(ch[0]=='v'||ch[0]=='V')) interactive_payment_special(a,acc,t,option_code,"voucher"); else if(redeem&&(ch[0]=='g'||ch[0]=='G')) interactive_payment_special(a,acc,t,option_code,"gift"); free(detail); free(data); free(option); free(family); free(variant); free(fname); free(vname); free(oname); free(validity); free(payfor); free(plan); }
 static void checkout_cart_pulsa(Accounts *a,Account *acc,Tokens *t,CartItem cart[3],int *cart_n){
 	if(*cart_n<1){ puts("Cart kosong."); pause_enter(); return; }
 	const char *missing=payment_config_missing();
@@ -683,7 +684,7 @@ static void checkout_cart_pulsa(Accounts *a,Account *acc,Tokens *t,CartItem cart
 	char totalbuf[64],choice[32];
 	money_id(total,totalbuf,sizeof(totalbuf));
 	printf("Total checkout: Rp %s\n",totalbuf);
-	printf("Mode: b balance, s balance+decoy standard, x balance+decoy v2, q qris, e e-wallet");
+	printf("Mode: b Balance, s Balance + Decoy, x Balance + Decoy V2, q QRIS, e E-Wallet");
 	if(loaded==1&&!strcmp(q[0].payment_for?q[0].payment_for:"","REDEEM_VOUCHER")) printf(", p point, v voucher/bonus, g kirim bonus");
 	printf(", Enter batal\n");
 	prompt_line("Pilihan: ",choice,sizeof(choice));
@@ -762,7 +763,7 @@ static const char *prompt_ewallet(char wallet[32]){ wallet[0]=0; char choice[16]
 static int interactive_payment_qris_quotes(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,long long custom_amount){ long long amount=custom_amount_or_prompt(total,custom_amount); if(confirm_amount("QRIS",amount)) return 0; char *resp=payment_qris_settle_many_ex(acc,t,q,n,amount,0,NULL); char *status=json_get_string(resp,"status"),*msg=json_get_string(resp,"message"),*tx=json_get_string(resp,"transaction_code"); int ok=payment_ok_status(status); printf("Result: %s%s%s\n",status?status:"UNKNOWN",msg?" - ":"",msg?msg:""); if(tx&&*tx){ char *pending=get_transaction_status_retry(a,acc,t,tx,""),*qr=json_get_string(pending,"qr_code"); printf("Transaction: %s\n",tx); if(qr&&*qr){ char *b64=b64_encode((unsigned char *)qr,strlen(qr),1); char *url=xasprintf("https://ki-ar-kod.netlify.app/?data=%s",b64); printf("QRIS URL:\n%s\nQRIS data:\n%s\n",url,qr); free(url); free(b64); } else printf("Pending detail:\n%s\n",pending); free(pending); free(qr); } if(!ok) printf("%s\n",resp); free(status); free(msg); free(tx); free(resp); return ok; }
 static int interactive_payment_ewallet_quotes(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,long long custom_amount){ char wallet[32],*resp; const char *method=prompt_ewallet(wallet); if(!*method) return 0; long long amount=custom_amount_or_prompt(total,custom_amount); if(confirm_amount(method,amount)) return 0; resp=payment_ewallet_settle_many(acc,t,q,n,amount,method,wallet); int ok=print_payment_response(resp); free(resp); return ok; }
 static int interactive_payment_decoy_quotes(Accounts *a,Account *acc,Tokens *t,PaymentQuote *q,int n,long long total,long long custom_amount,int standard){
-	const char *label=standard?"Balance + Decoy Standard":"Balance + Decoy V2";
+	const char *label=standard?"Balance + Decoy":"Balance + Decoy V2";
 	if(n>3){ printf("%s max 3 paket.\n",label); return 0; }
 	char *err=NULL,*decoy=decoy_option_code(t,acc,"balance",&err);
 	if(!decoy){ printf("Decoy gagal: %s\n",err?err:"unknown"); free(err); return 0; }
@@ -774,7 +775,7 @@ static int interactive_payment_decoy_quotes(Accounts *a,Account *acc,Tokens *t,P
 	long long amount=custom_amount_or_prompt(total,custom_amount);
 	if(confirm_amount(label,amount)){ payment_quote_free(&q[n]); return 0; }
 	int token_idx=standard?0:n;
-	const char *payment_for_override=standard?NULL:"";
+	const char *payment_for_override=standard?NULL:DECOY_V2_PAYMENT_FOR;
 	char *resp=payment_pulsa_settle_retry(acc,t,q,n+1,&amount,token_idx,payment_for_override,NULL);
 	int ok=print_payment_response(resp);
 	free(resp); payment_quote_free(&q[n]); return ok;
@@ -851,15 +852,18 @@ repeat_preflight_done:
 	free(preflight_target); free(preflight_decoy); free(preflight_err);
 	payment_quote_free(&preflight_q[0]); payment_quote_free(&preflight_q[1]);
 	if(!preflight_ok){ tokens_free(&t); free(act); accounts_free(&a); return preflight_cancelled?0:1; }
-	const char *mode=!opts->use_decoy?"Balance":(opts->token_idx==0?"Balance + Decoy Standard":"Balance + Decoy V2");
-	printf("Repeat purchase: %d time(s) | mode=%s | delay=%u second(s) | token_confirmation_idx=%d (selected=%d)\n",opts->count,mode,opts->delay_seconds,opts->token_idx_raw,opts->token_idx);
+	const char *token_source=(opts->use_decoy&&opts->token_idx==1)?"decoy":"target";
+	printf("Repeat purchase: %d time(s) | decoy=%s | delay=%u second(s) | token_confirmation_idx=%d (selected=%d, source=%s) | payment_for=%s\n",opts->count,opts->use_decoy?"yes":"no",opts->delay_seconds,opts->token_idx_raw,opts->token_idx,token_source,DECOY_V2_PAYMENT_FOR);
 	if(option_code) printf("Target option_code: %s\n",option_code);
 	else printf("Target family=%s variant=%s order=%d\n",family,variant,order);
-	int success=0,failed=0;
+	int success=0,failed=0; StrList successful={0};
 	for(int round=0;round<opts->count;round++){
 		PaymentQuote q[2]; memset(q,0,sizeof(q));
 		char *target_code=NULL,*decoy_code=NULL,*display_name=NULL,*err=NULL,*reason=NULL,*resp=NULL,*first=NULL,*status=NULL,*msg=NULL;
-		long long amount=0; int round_ok=0;
+		long long amount=0; int round_ok=0,settlement_attempted=0;
+		tokens_free(&t);
+		if(refresh_account(acc,&t)){ reason=xstrdup("active token retrieval failed"); goto repeat_round_done; }
+		account_sync(&a,acc,&t);
 		if(option_code) target_code=xstrdup(option_code);
 		else target_code=repeat_family_option_code(&a,acc,&t,family,variant,order,&err);
 		if(!target_code){ reason=err?err:xstrdup("target family/variant/order not found"); err=NULL; goto repeat_round_done; }
@@ -881,7 +885,8 @@ repeat_preflight_done:
 		display_name=xstrdup(q[0].item_name);
 		repeat_prefix_item_name(&q[0]);
 		if(opts->use_decoy) repeat_prefix_item_name(&q[1]);
-		resp=payment_pulsa_settle_retry(acc,&t,q,opts->use_decoy?2:1,&amount,opts->token_idx,(opts->use_decoy&&opts->token_idx==1)?"":NULL,&first);
+		settlement_attempted=1;
+		resp=payment_pulsa_settle_retry(acc,&t,q,opts->use_decoy?2:1,&amount,opts->token_idx,DECOY_V2_PAYMENT_FOR,&first);
 		status=resp?json_get_string(resp,"status"):NULL;
 		msg=resp?json_get_string(resp,"message"):NULL;
 		round_ok=payment_ok_status(status);
@@ -889,6 +894,7 @@ repeat_preflight_done:
 repeat_round_done:
 		if(round_ok){
 			success++;
+			sl_add(&successful,xasprintf("%s | amount=%lld",display_name?display_name:target_code,amount));
 			printf("[%d/%d] SUCCESS - %s | amount=%lld%s%s\n",round+1,opts->count,display_name?display_name:target_code,amount,msg?" | ":"",msg?msg:"");
 		} else {
 			failed++;
@@ -898,9 +904,11 @@ repeat_round_done:
 		if(first) printf("  Bizz-err.Amount.Total adjusted amount to %lld and retried with token index %d.\n",amount,opts->token_idx);
 		free(target_code); free(decoy_code); free(display_name); free(err); free(reason); free(resp); free(first); free(status); free(msg);
 		payment_quote_free(&q[0]); payment_quote_free(&q[1]);
-		if(opts->delay_seconds&&round+1<opts->count) sleep(opts->delay_seconds);
+		if(settlement_attempted&&opts->delay_seconds&&round+1<opts->count) sleep(opts->delay_seconds);
 	}
 	printf("Repeat purchase summary: requested=%d success=%d failed=%d\n",opts->count,success,failed);
+	if(successful.n){ puts("Successful purchases:"); for(size_t i=0;i<successful.n;i++) printf("%zu. %s\n",i+1,successful.v[i]); }
+	free_sl(&successful);
 	tokens_free(&t); free(act); accounts_free(&a);
 	return failed?1:0;
 }
@@ -921,6 +929,53 @@ static int cmd_purchase_n_times_by_option_code(int argc,char **argv){
 	RepeatPurchaseOptions opts; parse_repeat_purchase_options(argc-2,argv+2,(int)count,&opts);
 	const char *missing=payment_config_missing(); if(missing) die("missing env %s",missing);
 	return repeat_purchase_run(NULL,NULL,0,argv[0],&opts);
+}
+static void interactive_repeat_purchase(void){
+	const char *missing=payment_config_missing();
+	if(missing){ printf("Missing env %s. Set di Settings dulu.\n",missing); pause_enter(); return; }
+	char target_kind[8],family[256]={0},variant[256]={0},option[256]={0},input[64],answer[32];
+	long long parsed=0; int order=0;
+	RepeatPurchaseOptions opts; memset(&opts,0,sizeof(opts));
+	printf("\033[H\033[J%s=======================================================%s\n",CC,C0);
+	printf("%sPembelian Berulang%s\n",CB,C0);
+	printf("%s=======================================================%s\n",CC,C0);
+	puts("1. Pilih Paket via Family + Variant + Order\n2. Pilih Paket via Option Code\n00. Kembali");
+	prompt_line("Pilih target: ",target_kind,sizeof(target_kind));
+	if(!target_kind[0]||!strcmp(target_kind,"00")) return;
+	if(!strcmp(target_kind,"1")){
+		prompt_line("Family code: ",family,sizeof(family));
+		prompt_line("Variant code: ",variant,sizeof(variant));
+		prompt_line("Option order: ",input,sizeof(input));
+		if(!purchase_code_ok(family)||!purchase_code_ok(variant)||parse_bounded_ll(input,0,INT_MAX,&parsed)) goto repeat_input_invalid;
+		order=(int)parsed;
+	} else if(!strcmp(target_kind,"2")){
+		prompt_line("Option code: ",option,sizeof(option));
+		if(!purchase_code_ok(option)) goto repeat_input_invalid;
+	} else goto repeat_input_invalid;
+	prompt_line("Jumlah pembelian: ",input,sizeof(input));
+	if(parse_bounded_ll(input,1,INT_MAX,&parsed)) goto repeat_input_invalid;
+	opts.count=(int)parsed;
+	prompt_line("Delay antar pembelian dalam detik [0]: ",input,sizeof(input));
+	if(input[0]){ if(parse_bounded_ll(input,0,UINT_MAX,&parsed)) goto repeat_input_invalid; opts.delay_seconds=(unsigned int)parsed; }
+	prompt_line("Gunakan decoy? (y/N): ",answer,sizeof(answer));
+	if(answer[0]&&parse_bool_strict(answer,&opts.use_decoy)) goto repeat_input_invalid;
+	opts.token_idx_raw=0;
+	prompt_line(opts.use_decoy?"Token confirmation index (0/-2 target, 1/-1 decoy) [0]: ":"Token confirmation index (0/-1 target) [0]: ",input,sizeof(input));
+	if(input[0]){ if(parse_bounded_ll(input,INT_MIN,INT_MAX,&parsed)) goto repeat_input_invalid; opts.token_idx_raw=(int)parsed; }
+	if(repeat_token_index_strict(opts.token_idx_raw,opts.use_decoy?2:1,&opts.token_idx)) goto repeat_input_invalid;
+	printf("%s-------------------------------------------------------%s\n",CL,C0);
+	printf("Target : %s\n",!strcmp(target_kind,"1")?"Family + Variant + Order":"Option Code");
+	if(!strcmp(target_kind,"1")) printf("Family : %s\nVariant: %s\nOrder  : %d\n",family,variant,order);
+	else printf("Option : %s\n",option);
+	printf("Jumlah : %d\nDelay  : %u detik\nDecoy  : %s\nToken  : raw=%d, selected=%d (%s)\nPayment For: %s (upstream repeat)\n",opts.count,opts.delay_seconds,opts.use_decoy?"Ya":"Tidak",opts.token_idx_raw,opts.token_idx,(opts.use_decoy&&opts.token_idx==1)?"decoy":"target",DECOY_V2_PAYMENT_FOR);
+	char expected[64]; snprintf(expected,sizeof(expected),"BELI %d",opts.count);
+	printf("Ketik %s untuk konfirmasi: ",expected); fflush(stdout);
+	if(!fgets(answer,sizeof(answer),stdin)) answer[0]=0; trim(answer);
+	if(strcmp(answer,expected)){ puts("Pembelian berulang dibatalkan."); pause_enter(); return; }
+	repeat_purchase_run(!strcmp(target_kind,"1")?family:NULL,!strcmp(target_kind,"1")?variant:NULL,order,!strcmp(target_kind,"2")?option:NULL,&opts);
+	pause_enter(); return;
+repeat_input_invalid:
+	puts("Input pembelian berulang tidak valid."); pause_enter();
 }
 static void cmd_transaction_history_human(void){ Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(cli_begin(&a,&act,&acc,&t)) exit(1); char *history=get_transaction_history_retry(&a,acc,&t); puts(history); free(history); tokens_free(&t); free(act); accounts_free(&a); }
 static void cmd_pending_transactions_human(void){ Accounts a={0}; char *act=NULL; Account *acc=NULL; Tokens t={0}; if(cli_begin(&a,&act,&acc,&t)) exit(1); char *pending=get_pending_transactions_retry(&a,acc,&t); puts(pending); free(pending); tokens_free(&t); free(act); accounts_free(&a); }
@@ -968,6 +1023,6 @@ static void cmd_pay_human(const char *mode,int n,char **codes){
 	for(int i=0;i<loaded;i++) payment_quote_free(&q[i]);
 	tokens_free(&t); free(act); accounts_free(&a);
 }
-static void interactive_main_menu(void){ for(;;){ Accounts a=accounts_load(); char *act=active_get(); Account *active=(act&&*act)?accounts_find(&a,act):NULL; printf("\033[H\033[J"); printf("%s=======================================================%s\n",CC,C0); if(active){ printf("%sNomor:%s %s | %sType:%s %s\n",CB,C0,active->number,CB,C0,active->subscription_type); Tokens t={0}; if(refresh_account(active,&t)==0){ account_sync(&a,active,&t); char *bal=get_balance_api(&t); long long remaining=balance_remaining(bal),exp=balance_expired_at(bal); char rp[64],dt[32]; if(remaining>=0) money_id(remaining,rp,sizeof(rp)); else snprintf(rp,sizeof(rp),"N/A"); date_str(exp,dt,sizeof(dt)); printf("%sPulsa:%s Rp %s | %sAktif sampai:%s %s\n",CB,C0,rp,CB,C0,dt); free(bal); tokens_free(&t); } else printf("%sPulsa:%s N/A | %sAktif sampai:%s N/A\n",CB,C0,CB,C0); } else printf("Belum ada akun aktif\n"); printf("%s=======================================================%s\nMenu:\n1. Login/Ganti akun\n2. Lihat Paket Saya\n3. Store Segments\n4. Store Packages\n5. Beli Paket Berdasarkan Family Code\n6. Point / Redeemables\n99. Tutup aplikasi\n-------------------------------------------------------\n",CC,C0); char choice[32]; prompt_line("Pilih menu: ",choice,sizeof(choice)); if(!strcmp(choice,"1")){ free(act); accounts_free(&a); interactive_account_menu(); continue; } if(!strcmp(choice,"2")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { char num[32]; snprintf(num,sizeof(num),"%s",active->number); free(act); accounts_free(&a); interactive_quota(num); continue; } } else if(!strcmp(choice,"3")){ free(act); accounts_free(&a); interactive_store_segments(); continue; } else if(!strcmp(choice,"4")){ free(act); accounts_free(&a); interactive_store_packages(); continue; } else if(!strcmp(choice,"5")){ free(act); accounts_free(&a); interactive_store_family(); continue; } else if(!strcmp(choice,"6")){ free(act); accounts_free(&a); interactive_redeemables(""); continue; } else if(!strcmp(choice,"99")){ free(act); accounts_free(&a); puts("Exiting the application."); return; } else { puts("Invalid choice."); pause_enter(); } free(act); accounts_free(&a); } }
+static void interactive_main_menu(void){ for(;;){ Accounts a=accounts_load(); char *act=active_get(); Account *active=(act&&*act)?accounts_find(&a,act):NULL; printf("\033[H\033[J"); printf("%s=======================================================%s\n",CC,C0); if(active){ printf("%sNomor:%s %s | %sType:%s %s\n",CB,C0,active->number,CB,C0,active->subscription_type); Tokens t={0}; if(refresh_account(active,&t)==0){ account_sync(&a,active,&t); char *bal=get_balance_api(&t); long long remaining=balance_remaining(bal),exp=balance_expired_at(bal); char rp[64],dt[32]; if(remaining>=0) money_id(remaining,rp,sizeof(rp)); else snprintf(rp,sizeof(rp),"N/A"); date_str(exp,dt,sizeof(dt)); printf("%sPulsa:%s Rp %s | %sAktif sampai:%s %s\n",CB,C0,rp,CB,C0,dt); free(bal); tokens_free(&t); } else printf("%sPulsa:%s N/A | %sAktif sampai:%s N/A\n",CB,C0,CB,C0); } else printf("Belum ada akun aktif\n"); printf("%s=======================================================%s\nMenu:\n1. Login/Ganti akun\n2. Lihat Paket Saya\n3. Store Segments\n4. Store Packages\n5. Beli Paket Berdasarkan Family Code\n6. Point / Redeemables\n7. Pembelian Berulang\n99. Tutup aplikasi\n-------------------------------------------------------\n",CC,C0); char choice[32]; prompt_line("Pilih menu: ",choice,sizeof(choice)); if(!strcmp(choice,"1")){ free(act); accounts_free(&a); interactive_account_menu(); continue; } if(!strcmp(choice,"2")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { char num[32]; snprintf(num,sizeof(num),"%s",active->number); free(act); accounts_free(&a); interactive_quota(num); continue; } } else if(!strcmp(choice,"3")){ free(act); accounts_free(&a); interactive_store_segments(); continue; } else if(!strcmp(choice,"4")){ free(act); accounts_free(&a); interactive_store_packages(); continue; } else if(!strcmp(choice,"5")){ free(act); accounts_free(&a); interactive_store_family(); continue; } else if(!strcmp(choice,"6")){ free(act); accounts_free(&a); interactive_redeemables(""); continue; } else if(!strcmp(choice,"7")){ if(!active){ puts("No active user. Pilih/login akun dulu."); pause_enter(); } else { free(act); accounts_free(&a); interactive_repeat_purchase(); continue; } } else if(!strcmp(choice,"99")){ free(act); accounts_free(&a); puts("Exiting the application."); return; } else { puts("Invalid choice."); pause_enter(); } free(act); accounts_free(&a); } }
 static void usage(void){ puts("engsel                 # menu interaktif\nengsel login <628...>\nengsel otp <628...> <code>\nengsel accounts\nengsel use <628...>\nengsel del <628...>\nengsel logout\nengsel quota [628...]\nengsel segments [y|n]\nengsel point|redeemables [y|n]\nengsel history|transaction-history\nengsel pending|pending-transactions\nengsel transaction-status <id> [status]\nengsel pay-quote <package_code>\nengsel pay-pulsa <package_code> [--amount rupiah] BAYAR-<harga>\nengsel pay-balance|pay-qris|pay-ewallet [--amount rupiah] <package_code...>\nengsel pay-balance-decoy-standard [--amount rupiah] <option_code...>\nengsel pay-balance-decoy-v2 [--amount rupiah] <option_code...>\n  aliases: pay-decoy-standard; pay-decoy-v2; legacy pay-decoy/pay-balance-decoy -> V2\nengsel pay-point|pay-voucher|pay-gift <package_code>\nengsel purchase-n-times <family_code> <variant_code> <order> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel purchase-n-times-by-option-code <option_code> <count> [--delay seconds] [--use-decoy y|n] [--token-confirmation-idx idx]\nengsel env\nengsel accounts-json\nengsel status-json|dashboard-json\nengsel quota-json [628...]\nengsel env-json|settings-json\nengsel json family <family_code>\nengsel json notifications\nengsel json notification-detail <id>\nengsel json notification-read-all <id...>\nengsel json payment balance-decoy-standard <option_code...> confirm=1\nengsel json payment balance-decoy-v2 <option_code...> confirm=1\n  JSON aliases: decoy-standard; decoy-v2; legacy balance-decoy/decoy/prio -> V2\nengsel json tiering|history|transaction-history|pending|transaction-status|payment-status|family-list|point|redeemables\nengsel json shop family-list [y|n]\nengsel json dashboard|status|accounts|quota|segments|payment|env|settings|login|otp|use|del|logout|reset-session|unsub"); }
 int main(int argc,char **argv){ load_config(); if(argc<2){ require_config(); interactive_main_menu(); return 0; } if(!strcmp(argv[1],"--version")||!strcmp(argv[1],"-V")||!strcmp(argv[1],"version")){ puts(ENGSEL_VERSION); return 0; } if(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h")||!strcmp(argv[1],"help")){ usage(); return 0; } if(!strcmp(argv[1],"login")&&argc==3){ require_config(); cmd_login(argv[2]); } else if(!strcmp(argv[1],"otp")&&argc==4){ require_config(); cmd_otp(argv[2],argv[3]); } else if(!strcmp(argv[1],"accounts")) cmd_accounts(); else if(!strcmp(argv[1],"accounts-json")) cmd_json_accounts(); else if(!strcmp(argv[1],"use")&&argc==3) cmd_use(argv[2]); else if(!strcmp(argv[1],"del")&&argc==3) cmd_del(argv[2]); else if(!strcmp(argv[1],"logout")||!strcmp(argv[1],"reset-session")) cmd_logout(); else if(!strcmp(argv[1],"quota")){ require_config(); cmd_quota(argc>=3?argv[2]:NULL); } else if(!strcmp(argv[1],"quota-json")){ if(json_require_config()) return 1; cmd_json_quota(argc>=3?argv[2]:NULL,argc>=4&&!strcmp(argv[3],"fresh")); } else if(!strcmp(argv[1],"segments")||!strcmp(argv[1],"store-segments")){ require_config(); cmd_segments(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"point")||!strcmp(argv[1],"redeemables")){ require_config(); interactive_redeemables(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"shop")||!strcmp(argv[1],"store-packages")){ require_config(); cmd_shop(argc>=3?argv[2]:""); } else if(!strcmp(argv[1],"history")||!strcmp(argv[1],"transaction-history")){ require_config(); cmd_transaction_history_human(); } else if(!strcmp(argv[1],"pending")||!strcmp(argv[1],"pending-transactions")){ require_config(); cmd_pending_transactions_human(); } else if(!strcmp(argv[1],"transaction-status")||!strcmp(argv[1],"status-transaction")||!strcmp(argv[1],"payment-status")){ require_config(); cmd_transaction_status_human(argc>=3?argv[2]:NULL,argc>=4?argv[3]:""); } else if(!strcmp(argv[1],"pay-quote")&&argc>=3){ require_config(); cmd_pay_quote(argv[2]); } else if(!strcmp(argv[1],"pay-pulsa")&&argc>=3){ require_config(); int pay_argc=argc-2; char **pay_argv=argv+2; long long custom_amount=-1; if(strip_custom_amount_args(&pay_argc,pay_argv,&custom_amount)) die("invalid custom amount"); if(pay_argc<1) die("missing package code"); cmd_pay_pulsa(pay_argv[0],pay_argc>=2?pay_argv[1]:NULL,custom_amount); } else if(!strcmp(argv[1],"pay-balance")||!strcmp(argv[1],"pay-auto")){ require_config(); cmd_pay_human("balance",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-standard")||!strcmp(argv[1],"pay-decoy-standard")){ require_config(); cmd_pay_human("decoy-standard",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-balance-decoy-v2")||!strcmp(argv[1],"pay-decoy-v2")||!strcmp(argv[1],"pay-decoy")||!strcmp(argv[1],"pay-balance-decoy")){ require_config(); cmd_pay_human("decoy-v2",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-qris")){ require_config(); cmd_pay_human("qris",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-ewallet")){ require_config(); cmd_pay_human("ewallet",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-point")){ require_config(); cmd_pay_human("point",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-voucher")){ require_config(); cmd_pay_human("voucher",argc-2,argv+2); } else if(!strcmp(argv[1],"pay-gift")){ require_config(); cmd_pay_human("gift",argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times")){ require_config(); return cmd_purchase_n_times(argc-2,argv+2); } else if(!strcmp(argv[1],"purchase-n-times-by-option-code")){ require_config(); return cmd_purchase_n_times_by_option_code(argc-2,argv+2); } else if(!strcmp(argv[1],"status-json")||!strcmp(argv[1],"dashboard-json")){ if(json_require_config()) return 1; cmd_json_dashboard(); } else if(!strcmp(argv[1],"env")) cmd_env(); else if(!strcmp(argv[1],"env-json")||!strcmp(argv[1],"settings-json")) cmd_json_env(); else if(!strcmp(argv[1],"json")) cmd_json(argc-2,argv+2); else { usage(); return 1; } return 0; }
