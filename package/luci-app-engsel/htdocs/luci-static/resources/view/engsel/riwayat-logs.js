@@ -652,18 +652,23 @@ function quotaHistoryPage(data) {
 	const succeeded = snapshot.succeeded != null ? Number(snapshot.succeeded) : successful.length;
 	const failed = snapshot.failed != null ? Number(snapshot.failed) : Math.max(0, accounts.length - succeeded);
 	const recheck = E('button', {
-		'class': 'btn cbi-button cbi-button-apply',
+		'class': 'btn cbi-button cbi-button-apply engsel-quota-history-recheck',
 		'click': () => recheckAllQuota(recheck)
 	}, _('Recheck'));
 	return E('div', { 'class': 'cbi-map' }, [
+		E('style', {}, [
+			'.engsel-quota-history-actions{display:grid;grid-template-columns:minmax(0,18em) max-content;gap:.45em;align-items:center;min-width:0;max-width:100%}',
+			'.engsel-quota-history-actions .engsel-quota-history-select{width:100%;min-width:0;box-sizing:border-box}',
+			'.engsel-quota-history-actions .engsel-quota-history-recheck{width:auto;white-space:nowrap}'
+		].join('')),
 		E('div', { 'style': 'display:flex;justify-content:space-between;gap:1em;align-items:center;flex-wrap:wrap' }, [
 			E('div', {}, [
 				E('h2', { 'style': 'margin:0' }, _('Kuota History')),
 				E('div', { 'style': 'margin-top:.25em;color:inherit;opacity:.62' }, snapshot.checked_at ? formatDate(snapshot.checked_at) : '')
 			]),
-			E('div', { 'style': 'display:flex;gap:.45em;align-items:center;flex-wrap:wrap' }, [
+			E('div', { 'class': 'engsel-quota-history-actions' }, [
 				snapshots.length > 1 ? E('select', {
-					'class': 'cbi-input-select',
+					'class': 'cbi-input-select engsel-quota-history-select',
 					'change': (ev) => {
 						window.location.hash = 'snapshot=' + ev.target.value;
 						window.location.reload();
@@ -716,6 +721,14 @@ function readPaymentLogs() {
 	}
 }
 
+function paymentModeLabel(value) {
+	if (value === 'balance-decoy-standard' || value === 'decoy-standard')
+		return _('Balance + Decoy Standard');
+	if (value === 'balance-decoy-v2' || value === 'decoy-v2' || value === 'balance-decoy' || value === 'decoy' || value === 'prio')
+		return _('Balance + Decoy V2');
+	return value;
+}
+
 function paymentLogCard(entry, index) {
 	entry = entry || {};
 	const response = entry.response || entry.payload || entry;
@@ -738,7 +751,7 @@ function paymentLogCard(entry, index) {
 		]),
 		E('div', { 'style': 'display:flex;gap:.45em;flex-wrap:wrap;margin-top:.75em' }, [
 			chip(_('Source'), entry.source),
-			chip(_('Payment'), entry.payment),
+			chip(_('Payment'), paymentModeLabel(entry.payment)),
 			chip(_('Quoted'), formatMoney(quotedTotal)),
 			chip(_('Paid'), formatMoney(totalAmount)),
 			chip(_('Custom'), formatMoney(customPrice))

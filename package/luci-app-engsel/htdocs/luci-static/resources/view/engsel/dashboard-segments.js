@@ -12,7 +12,8 @@ const PAYMENT_LOG_KEY = 'engsel.payment.logs.v1';
 const QUOTA_HISTORY_KEY = 'engsel.quota.history.v1';
 const PAYMENT_MODES = [
 	{ value: 'balance', label: _('Balance'), command: 'balance' },
-	{ value: 'balance-decoy', label: _('Balance + Decoy'), command: 'balance-decoy' },
+	{ value: 'balance-decoy-standard', label: _('Balance + Decoy Standard'), command: 'balance-decoy-standard' },
+	{ value: 'balance-decoy-v2', label: _('Balance + Decoy V2'), command: 'balance-decoy-v2' },
 	{ value: 'qris', label: _('QRIS'), command: 'qris' },
 	{ value: 'dana', label: _('DANA'), command: 'dana', ewallet: true, wallet: true },
 	{ value: 'shopeepay', label: _('ShopeePay'), command: 'shopeepay', ewallet: true },
@@ -1544,7 +1545,7 @@ function loginPanel() {
 
 	return E('div', { 'style': 'min-width:0;width:100%;text-align:left' }, [
 		E('label', { 'style': 'display:block;margin-bottom:.25em;font-weight:600' }, _('Add account')),
-		E('div', { 'style': 'display:grid;grid-template-columns:minmax(6.5em,1fr) auto auto;gap:.35em;align-items:center' }, [ number, resend, cancel ]),
+		E('div', { 'style': 'display:grid;grid-template-columns:minmax(6em,10em) max-content max-content;justify-content:start;gap:.35em;align-items:center;max-width:100%' }, [ number, resend, cancel ]),
 		otpBox,
 		checkAll
 	]);
