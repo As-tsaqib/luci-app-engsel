@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-engsel
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=engsel users
 PKGARCH:=all
@@ -20,6 +20,7 @@ define Package/luci-app-engsel
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=LuCI app for Engsel MyXL quota client
+  URL:=https://github.com/As-tsaqib/luci-app-engsel
   DEPENDS:=+engsel +luci-base +rpcd +rpcd-mod-file +cgi-io
 endef
 

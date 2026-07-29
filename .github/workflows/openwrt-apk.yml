@@ -35,6 +35,33 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate LuCI JavaScript syntax
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const directory = 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel';
+          for (const name of fs.readdirSync(directory).filter((item) => item.endsWith('.js'))) {
+            const file = path.join(directory, name);
+            new Function(fs.readFileSync(file, 'utf8'));
+            console.log(`valid ${file}`);
+          }
+          NODE
+
+      - name: Validate package metadata
+        run: |
+          set -euo pipefail
+          jq empty package/luci-app-engsel/root/usr/share/luci/menu.d/luci-app-engsel.json
+          jq empty package/luci-app-engsel/root/usr/share/rpcd/acl.d/luci-app-engsel.json
+          sh -n package/openwrt/files/engsel.wrapper
+
   prepare:
     runs-on: ubuntu-24.04
     outputs:
@@ -68,7 +95,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.package_format }} / ${{ matrix.arch }}
-    needs: prepare
+    needs: [prepare, validate]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

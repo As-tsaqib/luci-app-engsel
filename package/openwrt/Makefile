@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=engsel
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=engsel users
 
@@ -14,7 +14,7 @@ define Package/engsel
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=Native MyXL CLI backend for OpenWrt
-  URL:=https://github.com/greencabe/luci-app-engsel
+  URL:=https://github.com/As-tsaqib/luci-app-engsel
   DEPENDS:=+libmbedtls +ca-bundle +curl
 endef
 

@@ -79,6 +79,12 @@
 	},
 	"admin/modem/engsel/riwayat/logs": {
 		"title": "Logs",
+		"order": 3,
+		"action": { "type": "view", "path": "engsel/riwayat-logs" },
+		"depends": { "acl": [ "luci-app-engsel" ] }
+	},
+	"admin/modem/engsel/riwayat/quota-history": {
+		"title": "Kuota History",
 		"order": 2,
 		"action": { "type": "view", "path": "engsel/riwayat-logs" },
 		"depends": { "acl": [ "luci-app-engsel" ] }

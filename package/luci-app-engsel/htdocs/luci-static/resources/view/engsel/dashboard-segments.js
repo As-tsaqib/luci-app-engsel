@@ -9,6 +9,7 @@ const SOFT_LINE = 'rgba(127,127,127,.16)';
 const SOFT_BORDER = 'linear-gradient(transparent,transparent) padding-box,linear-gradient(135deg,rgba(127,127,127,.26),rgba(127,127,127,.08),rgba(127,127,127,.20)) border-box';
 const BUY_STYLE = 'background:#003b95;border-color:#003b95;color:#fff';
 const PAYMENT_LOG_KEY = 'engsel.payment.logs.v1';
+const QUOTA_HISTORY_KEY = 'engsel.quota.history.v1';
 const PAYMENT_MODES = [
 	{ value: 'balance', label: _('Balance'), command: 'balance' },
 	{ value: 'balance-decoy', label: _('Balance + Decoy'), command: 'balance-decoy' },
@@ -1316,7 +1317,6 @@ function openAccountModal(accountsData, currentNumber) {
 	if (rows.length)
 		body.push(E('div', { 'style': 'margin:.9em 0;border-top:1px solid ' + SOFT_LINE }));
 	body.push(loginPanel());
-	body.push(E('button', { 'class': 'btn cbi-button', 'style': 'display:block;width:100%;margin-top:.75em', 'click': () => ui.hideModal() }, _('Cancel')));
 	ui.showModal(_('Switch Account'), body);
 }
 
@@ -1344,8 +1344,154 @@ function normalizeNumber(value) {
 	return value;
 }
 
+function quotaResponseData(response) {
+	let payload = response && response.quota ? response.quota : response;
+	if (payload && payload.response)
+		payload = payload.response;
+	if (payload && payload.data)
+		payload = payload.data;
+	return payload && typeof payload === 'object' ? payload : {};
+}
+
+function compactQuotaResponse(response) {
+	const payload = quotaResponseData(response);
+	const packages = Array.isArray(payload.quotas) ? payload.quotas : [];
+	return {
+		quotas: packages.map((pkg) => ({
+			name: pkg.name || '',
+			group_name: pkg.group_name || '',
+			group_code: pkg.group_code || '',
+			quota_code: pkg.quota_code || pkg.code || '',
+			product_domain: pkg.product_domain || pkg.domain || '',
+			product_subscription_type: pkg.product_subscription_type || pkg.subtype || '',
+			parent_code: pkg.parent_code || '',
+			is_addon: pkg.is_addon === true,
+			benefits: (Array.isArray(pkg.benefits) ? pkg.benefits : []).map((benefit) => ({
+				id: benefit.id || '',
+				name: benefit.name || '',
+				information: benefit.information || '',
+				data_type: benefit.data_type || '',
+				total: Number(benefit.total || 0),
+				remaining: Number(benefit.remaining || 0),
+				is_unlimited: benefit.is_unlimited === true,
+				benefit_type: benefit.benefit_type || '',
+				benefit_category: benefit.benefit_category || '',
+				is_fup: benefit.is_fup === true
+			}))
+		}))
+	};
+}
+
+function quotaResponseOk(response) {
+	const payload = quotaResponseData(response);
+	const status = String(response && response.status || payload.status || '').toUpperCase();
+	const code = String(response && response.code || payload.code || '').toUpperCase();
+	const success = status === 'SUCCESS' || code === '000' || (!status && !code && response && response.ok === true);
+	return !!response && response.ok !== false && success && Array.isArray(payload.quotas);
+}
+
+function saveQuotaSnapshot(snapshot) {
+	let previous = [];
+	try {
+		const stored = JSON.parse(localStorage.getItem(QUOTA_HISTORY_KEY) || '{}');
+		if (Array.isArray(stored.snapshots))
+			previous = stored.snapshots;
+		else if (Array.isArray(stored.accounts))
+			previous = [ stored ];
+	} catch (err) {}
+	const history = {
+		schema_version: 1,
+		snapshots: [ snapshot ].concat(previous).slice(0, 20)
+	};
+	const text = JSON.stringify(history);
+	try {
+		localStorage.setItem(QUOTA_HISTORY_KEY, text);
+		return true;
+	} catch (err) {
+		try {
+			sessionStorage.setItem(QUOTA_HISTORY_KEY, text);
+			return true;
+		} catch (sessionError) {
+			return false;
+		}
+	}
+}
+
+function quotaHistoryUrl() {
+	return L.url('admin/modem/engsel/riwayat/quota-history');
+}
+
+function finishQuotaCheck(snapshot, button) {
+	button.disabled = false;
+	button.textContent = _('Check All Number Kuota');
+	if (!saveQuotaSnapshot(snapshot)) {
+		notifyResult({ ok: false, error: _('Quota result is too large to save in this browser.') });
+		return;
+	}
+	ui.hideModal();
+	const succeeded = Number(snapshot.succeeded || 0);
+	const failed = Number(snapshot.failed || 0);
+	ui.addNotification(null, E('p', {}, _('%d number checked, %d failed.').format(succeeded, failed)), failed ? 'warning' : 'info');
+	window.location.href = quotaHistoryUrl();
+}
+
+function runQuotaCheckAll(button) {
+	return callEngsel([ 'json', 'accounts' ]).then((accountsResult) => {
+		const accounts = accountsResult && Array.isArray(accountsResult.accounts) ? accountsResult.accounts : [];
+		if (!accounts.length) {
+			button.disabled = false;
+			button.textContent = _('Check All Number Kuota');
+			return notifyResult({ ok: false, error: _('No registered number found.') });
+		}
+
+		const snapshot = {
+			schema_version: 1,
+			checked_at: Math.floor(Date.now() / 1000),
+			ok: false,
+			complete: false,
+			total_accounts: accounts.length,
+			succeeded: 0,
+			failed: 0,
+			accounts: []
+		};
+		let chain = Promise.resolve();
+		accounts.forEach((account, index) => {
+			chain = chain.then(() => {
+				button.textContent = _('Checking %d/%d...').format(index + 1, accounts.length);
+				return callEngsel([ 'json', 'quota', account.number, 'fresh' ]).then((response) => {
+					const ok = quotaResponseOk(response);
+					const entry = {
+						number: account.number,
+						subscription_type: account.subscription_type || '',
+						ok: ok
+					};
+					if (ok) {
+						entry.quota = compactQuotaResponse(response);
+						snapshot.succeeded++;
+					} else {
+						entry.error = response && (response.error || response.message || response.code) || _('Quota check failed.');
+						snapshot.failed++;
+					}
+					snapshot.accounts.push(entry);
+				});
+			});
+		});
+		return chain.then(() => {
+			snapshot.ok = snapshot.succeeded > 0;
+			snapshot.complete = snapshot.failed === 0;
+			finishQuotaCheck(snapshot, button);
+		});
+	});
+}
+
+function checkAllNumberQuota(button) {
+	button.disabled = true;
+	button.textContent = _('Checking all numbers...');
+	return runQuotaCheckAll(button);
+}
+
 function loginPanel() {
-	const number = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'placeholder': '08xxxx / 628xxxx', 'style': 'max-width:12em' });
+	const number = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'inputmode': 'numeric', 'placeholder': '08xxxx / 628xxxx', 'style': 'box-sizing:border-box;min-width:0;width:100%;max-width:10em' });
 	const otp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'placeholder': 'OTP', 'style': 'max-width:7em' });
 	const otpBox = E('div', { 'style': 'display:none;margin-top:.45em;text-align:left' }, [
 		otp,
@@ -1385,11 +1531,22 @@ function loginPanel() {
 			});
 		}
 	}, _('Resend OTP'));
+	const cancel = E('button', {
+		'class': 'btn cbi-button',
+		'style': 'white-space:nowrap;padding-left:.65em;padding-right:.65em',
+		'click': () => ui.hideModal()
+	}, _('Cancel'));
+	const checkAll = E('button', {
+		'class': 'btn cbi-button cbi-button-save',
+		'style': 'display:block;width:100%;margin-top:.75em;background:#16803a;border-color:#16803a;color:#fff;font-weight:700',
+		'click': () => checkAllNumberQuota(checkAll)
+	}, _('Check All Number Kuota'));
 
-	return E('div', { 'style': 'min-width:18em;text-align:left' }, [
+	return E('div', { 'style': 'min-width:0;width:100%;text-align:left' }, [
 		E('label', { 'style': 'display:block;margin-bottom:.25em;font-weight:600' }, _('Add account')),
-		E('div', {}, [ number, ' ', resend ]),
-		otpBox
+		E('div', { 'style': 'display:grid;grid-template-columns:minmax(6.5em,1fr) auto auto;gap:.35em;align-items:center' }, [ number, resend, cancel ]),
+		otpBox,
+		checkAll
 	]);
 }
 

@@ -1,6 +1,6 @@
 # luci-app-engsel
 
-OpenWrt LuCI app for MyXL account, quota, store, checkout, notifications, and transaction status.
+OpenWrt LuCI app for MyXL account, multi-number quota history, store, checkout, notifications, and transaction status.
 
 Native C backend. No Python runtime on router.
 
@@ -13,14 +13,15 @@ https://github.com/purplemashu/me-cli-sunset.git
 ## Packages
 
 ```text
-engsel            1.0.0-r3
-luci-app-engsel  1.0.0-r2
+engsel            1.0.0-r4
+luci-app-engsel  1.0.0-r3
 ```
 
 ## LuCI
 
 ```text
 Modem > Engsel
+Modem > Engsel > Riwayat > Kuota History
 Modem > Engsel > Notifikasi
 ```
 

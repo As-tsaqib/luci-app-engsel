@@ -4,9 +4,11 @@
 'require ui';
 
 const BIN = '/usr/bin/engsel';
+const SOFT_TRACK = 'rgba(127,127,127,.22)';
 const SOFT_LINE = 'rgba(127,127,127,.16)';
 const SOFT_BORDER = 'linear-gradient(transparent,transparent) padding-box,linear-gradient(135deg,rgba(127,127,127,.24),rgba(127,127,127,.08),rgba(127,127,127,.18)) border-box';
 const PAYMENT_LOG_KEY = 'engsel.payment.logs.v1';
+const QUOTA_HISTORY_KEY = 'engsel.quota.history.v1';
 const LINK_KEYS = [ 'link', 'url', 'payment_url', 'deeplink', 'deep_link', 'qris_url', 'qr_url', 'detail_url', 'detail_link' ];
 const DETAIL_KEYS = [ 'qris', 'qris_code', 'qr_code', 'detail', 'code', 'trx_code', 'transaction_code', 'reference_id', 'payment_id' ];
 const TX_KEYS = [ 'transaction_id', 'transaction_code', 'trx_code', 'reference_id', 'payment_id' ];
@@ -324,8 +326,255 @@ function responsePanel(data) {
 	]);
 }
 
+function readQuotaSnapshot() {
+	const candidates = [];
+	[ localStorage, sessionStorage ].forEach((storage) => {
+		try {
+			const value = JSON.parse(storage.getItem(QUOTA_HISTORY_KEY) || '{}');
+			if (value && (Array.isArray(value.accounts) || Array.isArray(value.snapshots)))
+				candidates.push(value);
+		} catch (err) {}
+	});
+	const newest = (value) => {
+		const snapshot = Array.isArray(value.snapshots) ? value.snapshots[0] : value;
+		return Number(snapshot && snapshot.checked_at || 0);
+	};
+	candidates.sort((left, right) => newest(right) - newest(left));
+	return candidates[0] || null;
+}
+
+function quotaSnapshotIndex() {
+	const match = String(window.location.hash || '').match(/(?:^#|&)snapshot=([0-9]+)/);
+	return match ? Math.max(0, Number(match[1]) || 0) : 0;
+}
+
+function quotaSnapshots(data) {
+	if (data && Array.isArray(data.snapshots))
+		return data.snapshots.filter((item) => item && Array.isArray(item.accounts));
+	if (data && data.history && Array.isArray(data.history.snapshots))
+		return data.history.snapshots.filter((item) => item && Array.isArray(item.accounts));
+	const single = data && data.snapshot && Array.isArray(data.snapshot.accounts) ? data.snapshot : (data && Array.isArray(data.accounts) ? data : null);
+	return single ? [ single ] : [];
+}
+
+function quotaSnapshot(data) {
+	const snapshots = quotaSnapshots(data);
+	return snapshots[Math.min(quotaSnapshotIndex(), Math.max(0, snapshots.length - 1))] || null;
+}
+
+function quotaPayload(entry) {
+	let payload = entry && entry.quota || {};
+	if (payload.response)
+		payload = payload.response;
+	if (payload.data)
+		payload = payload.data;
+	return payload && typeof payload === 'object' ? payload : {};
+}
+
+function formatBytes(value) {
+	value = Math.max(0, Number(value || 0));
+	const units = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
+	let index = 0;
+	while (value >= 1024 && index < units.length - 1) {
+		value /= 1024;
+		index++;
+	}
+	const digits = index === 0 || value >= 10 ? 0 : 2;
+	return '%s %s'.format(value.toFixed(digits), units[index]);
+}
+
+function quotaPercent(remaining, total) {
+	remaining = Number(remaining || 0);
+	total = Number(total || 0);
+	return total > 0 ? Math.max(0, Math.min(100, Math.round(remaining * 100 / total))) : 0;
+}
+
+function metadataAddon(packageItem, benefit) {
+	if (packageItem && (packageItem.is_addon === true || packageItem.parent_code))
+		return true;
+	const type = String(benefit && benefit.benefit_type || '').trim().toUpperCase();
+	const category = String(benefit && benefit.benefit_category || '').trim().toUpperCase();
+	const general = [ '', 'DEFAULT', 'GENERAL', 'REGULAR', 'MAIN', 'BASIC', 'DATA', 'INTERNET' ];
+	if (general.indexOf(type) < 0 || general.indexOf(category) < 0)
+		return true;
+	const text = [
+		packageItem && packageItem.name,
+		packageItem && packageItem.group_name,
+		benefit && benefit.name,
+		benefit && benefit.information
+	].join(' ').toUpperCase();
+	const markers = [ 'YOUTUBE', 'WHATSAPP', 'TIKTOK', 'INSTAGRAM', 'FACEBOOK', 'NETFLIX', 'SPOTIFY', 'VIDIO', 'ZOOM', 'SOCIAL MEDIA', 'MUSIC', 'GAME', 'APLIKASI', 'APPLICATION', 'ADD-ON', 'ADDON' ];
+	return markers.some((marker) => text.indexOf(marker) >= 0);
+}
+
+function accountQuotaBenefits(entry) {
+	const payload = quotaPayload(entry);
+	const packages = Array.isArray(payload.quotas) ? payload.quotas : [];
+	const result = [];
+	packages.forEach((packageItem) => {
+		(Array.isArray(packageItem.benefits) ? packageItem.benefits : []).forEach((benefit) => {
+			if (String(benefit.data_type || '').toUpperCase() !== 'DATA')
+				return;
+			result.push({
+				name: benefit.name || _('Data quota'),
+				package_name: packageItem.name || '',
+				group_name: packageItem.group_name || '',
+				remaining: Math.max(0, Number(benefit.remaining || 0)),
+				total: Math.max(0, Number(benefit.total || 0)),
+				unlimited: benefit.is_unlimited === true,
+				addon: metadataAddon(packageItem, benefit)
+			});
+		});
+	});
+	return result;
+}
+
+function sumQuotaBenefits(items) {
+	return (items || []).reduce((sum, item) => {
+		if (item.unlimited)
+			sum.unlimited++;
+		else {
+			sum.remaining += Number(item.remaining || 0);
+			sum.total += Number(item.total || 0);
+		}
+		return sum;
+	}, { remaining: 0, total: 0, unlimited: 0 });
+}
+
+function quotaProgress(summary, height) {
+	const percent = quotaPercent(summary.remaining, summary.total);
+	const color = percent >= 60 ? '#46a546' : (percent >= 30 ? '#c09853' : '#b94a48');
+	const filled = Math.round(percent / 10);
+	const cells = [];
+	for (let index = 0; index < 10; index++) {
+		cells.push(E('span', {
+			'style': 'display:block;flex:1;height:100%;border-radius:2px;background:' + (index < filled ? color : SOFT_TRACK)
+		}));
+	}
+	return E('div', {
+		'role': 'progressbar',
+		'aria-valuemin': '0',
+		'aria-valuemax': '100',
+		'aria-valuenow': String(percent),
+		'style': 'display:flex;gap:3px;height:' + (height || '13px') + ';align-items:stretch'
+	}, cells);
+}
+
+function quotaBenefitRow(item) {
+	const summary = { remaining: item.remaining, total: item.total };
+	return E('div', { 'style': 'padding:.75em 0;border-top:1px solid ' + SOFT_LINE }, [
+		E('div', { 'style': 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.4em 1em;align-items:start;margin-bottom:.45em' }, [
+			E('div', { 'style': 'min-width:0' }, [
+				E('div', { 'style': 'font-weight:650;line-height:1.25;overflow-wrap:anywhere' }, item.name),
+				E('div', { 'style': 'margin-top:.18em;color:inherit;opacity:.55;font-size:.88em;overflow-wrap:anywhere' }, [ item.package_name, item.group_name ].filter(Boolean).join(' · '))
+			]),
+			E('div', { 'style': 'text-align:right;white-space:nowrap;font-weight:700;color:#0645c8' }, item.unlimited ? _('Unlimited') : '%s / %s'.format(formatBytes(item.remaining), formatBytes(item.total)))
+		]),
+		item.unlimited ? '' : quotaProgress(summary, '13px')
+	]);
+}
+
+function quotaGroup(title, items) {
+	if (!items.length)
+		return '';
+	const summary = sumQuotaBenefits(items);
+	return E('div', { 'style': 'margin-top:.9em;padding:.85em;border:1px solid ' + SOFT_LINE + ';border-radius:8px;background:rgba(127,127,127,.035)' }, [
+		E('div', { 'style': 'display:flex;justify-content:space-between;gap:1em;align-items:center;margin-bottom:.15em' }, [
+			E('div', { 'style': 'font-weight:750' }, title),
+			E('div', { 'style': 'white-space:nowrap;font-size:.92em;color:inherit;opacity:.68' }, summary.unlimited ? _('%s + %d unlimited').format(formatBytes(summary.remaining), summary.unlimited) : formatBytes(summary.remaining))
+		]),
+		...items.map(quotaBenefitRow)
+	]);
+}
+
+function quotaAccountCard(entry) {
+	if (!entry || entry.ok === false) {
+		return E('div', { 'class': 'cbi-section', 'style': 'margin-top:1em;border:1px solid rgba(185,74,72,.35);border-radius:10px;padding:1em' }, [
+			E('div', { 'style': 'font-weight:750' }, entry && entry.number || _('Unknown number')),
+			E('div', { 'class': 'alert-message warning', 'style': 'margin-top:.7em' }, entry && entry.error || _('Quota check failed.'))
+		]);
+	}
+	const benefits = accountQuotaBenefits(entry);
+	const main = benefits.filter((item) => !item.addon);
+	const addons = benefits.filter((item) => item.addon);
+	const summary = sumQuotaBenefits(benefits);
+	return E('div', { 'class': 'cbi-section', 'style': 'margin-top:1em;border:1px solid transparent;border-radius:10px;background:' + SOFT_BORDER + ';padding:1em' }, [
+		E('div', { 'style': 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.55em 1em;align-items:start' }, [
+			E('div', { 'style': 'min-width:0' }, [
+				E('div', { 'style': 'font-size:1.1em;font-weight:800;overflow-wrap:anywhere' }, entry.number || '-'),
+				E('div', { 'style': 'margin-top:.2em;color:inherit;opacity:.58;font-size:.9em' }, entry.subscription_type || '')
+			]),
+			E('div', { 'style': 'text-align:right;white-space:nowrap' }, [
+				E('div', { 'style': 'font-size:1.1em;font-weight:800;color:#0645c8' }, formatBytes(summary.remaining)),
+				E('div', { 'style': 'margin-top:.15em;color:inherit;opacity:.58;font-size:.88em' }, _('%d%% remaining').format(quotaPercent(summary.remaining, summary.total)))
+			])
+		]),
+		benefits.length ? E('div', { 'style': 'margin-top:.7em' }, quotaProgress(summary, '13px')) : '',
+		benefits.length ? quotaGroup(_('Kuota Utama'), main) : E('div', { 'class': 'alert-message warning', 'style': 'margin-top:.8em' }, _('No data quota detail found.')),
+		quotaGroup(_('Kuota Aplikasi / Add-on'), addons)
+	]);
+}
+
+function quotaHistoryPage(data) {
+	const snapshot = quotaSnapshot(data);
+	const snapshots = quotaSnapshots(data);
+	if (!snapshot) {
+		return E('div', { 'class': 'cbi-map' }, [
+			E('h2', {}, _('Kuota History')),
+			E('div', { 'class': 'alert-message warning' }, (data && (data.error || data.message)) || _('No quota snapshot yet. Use Check All Number Kuota from the account popup.'))
+		]);
+	}
+	const accounts = snapshot.accounts || [];
+	const successful = accounts.filter((entry) => entry && entry.ok !== false);
+	const totals = sumQuotaBenefits([].concat.apply([], successful.map(accountQuotaBenefits)));
+	const succeeded = snapshot.succeeded != null ? Number(snapshot.succeeded) : successful.length;
+	const failed = snapshot.failed != null ? Number(snapshot.failed) : Math.max(0, accounts.length - succeeded);
+	return E('div', { 'class': 'cbi-map' }, [
+		E('div', { 'style': 'display:flex;justify-content:space-between;gap:1em;align-items:center;flex-wrap:wrap' }, [
+			E('div', {}, [
+				E('h2', { 'style': 'margin:0' }, _('Kuota History')),
+				E('div', { 'style': 'margin-top:.25em;color:inherit;opacity:.62' }, snapshot.checked_at ? formatDate(snapshot.checked_at) : '')
+			]),
+			E('div', { 'style': 'display:flex;gap:.45em;align-items:center;flex-wrap:wrap' }, [
+				snapshots.length > 1 ? E('select', {
+					'class': 'cbi-input-select',
+					'change': (ev) => {
+						window.location.hash = 'snapshot=' + ev.target.value;
+						window.location.reload();
+					}
+				}, snapshots.map((item, index) => E('option', {
+					'value': String(index),
+					'selected': index === quotaSnapshotIndex()
+				}, item.checked_at ? formatDate(item.checked_at) : _('Snapshot %d').format(index + 1)))) : '',
+				E('button', { 'class': 'btn cbi-button cbi-button-reload', 'click': () => window.location.reload() }, _('Refresh'))
+			])
+		]),
+		E('div', { 'class': 'cbi-section', 'style': 'margin-top:1em;padding:clamp(1em,4vw,1.5em);border:1px solid transparent;border-radius:8px;background:' + SOFT_BORDER }, [
+			E('div', { 'style': 'font-size:.9em;color:inherit;opacity:.58;font-weight:600' }, _('Total Sisa Kuota')),
+			E('div', { 'style': 'display:flex;justify-content:space-between;gap:1em;align-items:flex-end;flex-wrap:wrap;margin:.45em 0 .8em' }, [
+				E('div', { 'style': 'font-size:clamp(2em,8vw,3.2em);font-weight:850;line-height:1' }, formatBytes(totals.remaining)),
+				E('div', { 'style': 'text-align:right;color:inherit;opacity:.68' }, [
+					E('div', { 'style': 'font-weight:700' }, _('of %s total').format(formatBytes(totals.total))),
+					totals.unlimited ? E('div', { 'style': 'margin-top:.2em' }, _('%d unlimited quota').format(totals.unlimited)) : ''
+				])
+			]),
+			quotaProgress(totals, '16px'),
+			E('div', { 'style': 'display:flex;gap:.6em;flex-wrap:wrap;margin-top:.85em;font-size:.9em' }, [
+				E('span', { 'style': 'padding:.25em .6em;border:1px solid ' + SOFT_LINE + ';border-radius:4px;background:rgba(127,127,127,.08)' }, _('%d number success').format(succeeded)),
+				E('span', { 'style': 'padding:.25em .6em;border:1px solid ' + SOFT_LINE + ';border-radius:4px;background:rgba(127,127,127,.08)' }, _('%d failed').format(failed)),
+				E('span', { 'style': 'padding:.25em .6em;border:1px solid ' + SOFT_LINE + ';border-radius:4px;background:rgba(127,127,127,.08)' }, _('%d%% remaining').format(quotaPercent(totals.remaining, totals.total)))
+			])
+		]),
+		failed ? E('div', { 'class': 'alert-message warning', 'style': 'margin-top:1em' }, _('Some numbers could not be checked. Their session may need a new OTP.')) : '',
+		E('h3', { 'style': 'margin:1.25em 0 .25em' }, _('Detail per Nomor')),
+		...accounts.map(quotaAccountCard)
+	]);
+}
+
 function currentMode() {
 	const path = window.location.pathname + window.location.search + window.location.hash;
+	if (path.indexOf('/riwayat/quota-history') >= 0 || path.indexOf('riwayat/quota-history') >= 0)
+		return 'quota-history';
 	return path.indexOf('/riwayat/logs') >= 0 || path.indexOf('riwayat/logs') >= 0 ? 'logs' : 'transaction-history';
 }
 
@@ -416,11 +665,19 @@ function paymentLogsPage() {
 
 return view.extend({
 	load() {
-		return currentMode() === 'logs' ? Promise.resolve({}) : callEngsel([ 'json', 'transaction-history' ]);
+		const mode = currentMode();
+		if (mode === 'logs')
+			return Promise.resolve({});
+		if (mode === 'quota-history') {
+			const local = readQuotaSnapshot();
+			return Promise.resolve(local || {});
+		}
+		return callEngsel([ 'json', 'transaction-history' ]);
 	},
 
 	render(data) {
-		return currentMode() === 'logs' ? paymentLogsPage() : transactionHistoryPage(data);
+		const mode = currentMode();
+		return mode === 'logs' ? paymentLogsPage() : (mode === 'quota-history' ? quotaHistoryPage(data) : transactionHistoryPage(data));
 	},
 
 	handleSaveApply: null,
