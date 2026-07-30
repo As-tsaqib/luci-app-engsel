@@ -1,0 +1,349 @@
+name: OpenWrt Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Target architecture
+        type: choice
+        default: all
+        options:
+          - all
+          - aarch64_generic
+          - aarch64_cortex-a53
+          - arm_cortex-a7_neon-vfpv4
+          - mipsel_24kc
+          - x86_64
+      package_format:
+        description: Package format
+        type: choice
+        default: all
+        options:
+          - all
+          - ipk
+          - apk
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate LuCI JavaScript syntax
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const directory = 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel';
+          for (const name of fs.readdirSync(directory).filter((item) => item.endsWith('.js'))) {
+            const file = path.join(directory, name);
+            new Function(fs.readFileSync(file, 'utf8'));
+            console.log(`valid ${file}`);
+          }
+          NODE
+
+      - name: Validate package metadata
+        run: |
+          set -euo pipefail
+          jq empty package/luci-app-engsel/root/usr/share/luci/menu.d/luci-app-engsel.json
+          jq empty package/luci-app-engsel/root/usr/share/rpcd/acl.d/luci-app-engsel.json
+          sh -n package/openwrt/files/engsel.wrapper
+
+      - name: Validate Decoy and CLI source contracts
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+          active_keys = [
+              'DECOY_PREPAID_FAMILY_CODE',
+              'DECOY_PREPAID_PACKAGE_NUMBER',
+              'DECOY_PRIORITAS_FAMILY_CODE',
+              'DECOY_PRIORITAS_PACKAGE_NUMBER',
+              'DECOY_PRIOHYBRID_FAMILY_CODE',
+              'DECOY_PRIOHYBRID_PACKAGE_NUMBER',
+          ]
+          active_surfaces = [
+              root / 'src/engsel.c',
+              root / 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel/settings.js',
+              root / 'package/openwrt/files/engsel.wrapper',
+              root / 'package/openwrt/files/engsel.env',
+              root / 'package/openwrt/files/engsel.env.example',
+              root / 'package/openwrt/Makefile',
+              root / 'README.md',
+          ]
+          for path in active_surfaces:
+              text = path.read_text(encoding='utf-8')
+              missing = [key for key in active_keys if key not in text]
+              assert not missing, f'{path}: missing active Decoy keys {missing}'
+
+          legacy_keys = [
+              'DECOY_PREPAID_OPTION_CODE',
+              'DECOY_PRIORITAS_OPTION_CODE',
+              'DECOY_PRIOHYBRID_OPTION_CODE',
+              'DECOY_BALANCE_OPTION_CODE',
+          ]
+          for path in active_surfaces:
+              text = path.read_text(encoding='utf-8')
+              present = [key for key in legacy_keys if key in text]
+              assert not present, f'{path}: legacy Decoy keys still active/exposed {present}'
+
+          source = (root / 'src/engsel.c').read_text(encoding='utf-8')
+          assert 'Balance + Decoy Standard' not in source
+          assert '7. Beli Semua Paket dalam Family Code (Loop)' in source
+          assert 'purchase-by-family' in source
+          assert 'Pulsa N Kali' in source
+          assert '82772' not in source
+          assert '#define DECOY_V2_PAYMENT_FOR "\\xF0\\x9F\\xA4\\xAB"' in source
+          assert '#define FAMILY_LOOP_PAYMENT_FOR "\\xF0\\x9F\\xA4\\x91"' in source
+          prepaid_builtin = 'return family_variant_order_context(t,"b0a20d74-0c54-4e3b-8f3f-01e7482e50bf","719d093f-6f8d-46a4-8390-6a0003a172ea",1,"true","NONE",context,err);'
+          assert prepaid_builtin in source, 'built-in PREPAID decoy must keep the pinned upstream family/variant/context'
+          package_context_end = source.index('} PackageContext;') + len('} PackageContext;')
+          package_context_start = source.rfind('typedef struct {', 0, package_context_end)
+          assert package_context_start >= 0, 'PackageContext declaration not found'
+          package_context_decl = source[package_context_start:package_context_end]
+          for field in ('option_code', 'family_code', 'variant_code', 'is_enterprise', 'migration_type'):
+              assert re.search(rf'\b{field}\b', package_context_decl), f'PackageContext missing {field}'
+          assert 'get_store_family_packages_context_result' in source
+          assert 'payment_quote_load_context' in source
+          assert 'settlement_context=payment_cart_context(q,n)' in source
+          assert 'family_purchase_start_index' in source, 'family loop start must follow API option order'
+          resolver = source[source.index('static int decoy_quote_resolve('):source.index('static int payment_quotes_reload_current(')]
+          assert 'DECOY_RESOLVE_RETRY_151' in resolver, 'resolver must distinguish retryable code 151'
+          assert 'DECOY_RESOLVE_RETRY_AUTH' in resolver, 'resolver must distinguish retryable auth failures'
+          assert 'response_cache_' not in resolver, 'resolved option code must not use a global response cache'
+
+          luci_sources = '\n'.join(
+              path.read_text(encoding='utf-8')
+              for path in (root / 'package/luci-app-engsel/htdocs/luci-static/resources/view/engsel').glob('*.js')
+          )
+          for cli_only in ('purchase-n-times', 'purchase-by-family', 'Pulsa N Kali'):
+              assert cli_only not in luci_sources, f'CLI-only feature leaked into LuCI: {cli_only}'
+
+          backend_makefile = (root / 'package/openwrt/Makefile').read_text(encoding='utf-8')
+          luci_makefile = (root / 'package/luci-app-engsel/Makefile').read_text(encoding='utf-8')
+          readme = (root / 'README.md').read_text(encoding='utf-8')
+          backend_version = re.search(r'^PKG_VERSION:=(.+)$', backend_makefile, re.M).group(1)
+          luci_version = re.search(r'^PKG_VERSION:=(.+)$', luci_makefile, re.M).group(1)
+          backend_release = re.search(r'^PKG_RELEASE:=(\d+)$', backend_makefile, re.M).group(1)
+          luci_release = re.search(r'^PKG_RELEASE:=(\d+)$', luci_makefile, re.M).group(1)
+          source_release = re.search(r'^#define ENGSEL_VERSION "1\.1\.0-r(\d+)"$', source, re.M).group(1)
+          assert backend_version == luci_version == '1.1.0'
+          assert backend_release == source_release == '1'
+          assert luci_release == '1'
+          assert 'engsel            1.1.0-r1' in readme
+          assert 'luci-app-engsel  1.1.0-r1' in readme
+          PY
+
+      - name: Run native resolver unit tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev
+          cc -std=c99 -Wall -Wextra -Werror=misleading-indentation -Werror=format-truncation -Wno-unused-parameter \
+            .github/ci/decoy_resolver_test.c -lmbedcrypto -o /tmp/engsel-decoy-resolver-test
+          /tmp/engsel-decoy-resolver-test
+
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: build_matrix
+        run: |
+          set -euo pipefail
+          selected_arch="${{ inputs.arch || 'all' }}"
+          selected_format="${{ inputs.package_format || 'all' }}"
+          arches="aarch64_generic aarch64_cortex-a53 arm_cortex-a7_neon-vfpv4 mipsel_24kc x86_64"
+          formats="ipk apk"
+          json='{"include":['
+          sep=''
+          for arch in $arches; do
+            [ "$selected_arch" = all ] || [ "$selected_arch" = "$arch" ] || continue
+            for format in $formats; do
+              [ "$selected_format" = all ] || [ "$selected_format" = "$format" ] || continue
+              case "$format" in
+                ipk) version="24.10.8" ;;
+                apk) version="25.12.5" ;;
+              esac
+              json="$json$sep{\"arch\":\"$arch\",\"openwrt_version\":\"$version\",\"package_format\":\"$format\"}"
+              sep=','
+            done
+          done
+          json="$json]}"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "$json"
+
+  build:
+    name: Build ${{ matrix.package_format }} / ${{ matrix.arch }}
+    needs: [prepare, validate]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create SDK build script
+        run: |
+          mkdir -p .github/openwrt-helper
+          cat > .github/openwrt-helper/build-engsel.sh <<'BUILDSCRIPT'
+          #!/bin/bash
+          set -euxo pipefail
+
+          cd /builder
+          [ -d ./scripts ] || ./setup.sh
+
+          rm -rf package/engsel package/luci-app-engsel /work/dist
+          mkdir -p package/engsel package/luci-app-engsel /work/dist
+
+          cp -a /work/src package/engsel/src
+          cp -a /work/package/openwrt/Makefile package/engsel/Makefile
+          cp -a /work/package/openwrt/files package/engsel/files
+          cp -a /work/package/luci-app-engsel/. package/luci-app-engsel/
+
+          for attempt in 1 2 3; do
+            if ./scripts/feeds update -a; then
+              break
+            fi
+            [ "$attempt" = 3 ] && exit 1
+            sleep $((attempt * 30))
+          done
+          for package in libmbedtls ca-bundle curl luci-base rpcd rpcd-mod-file cgi-io; do
+            ./scripts/feeds install "$package" || true
+          done
+
+          cat >> .config <<'CFG'
+          CONFIG_ALL_NONSHARED=n
+          CONFIG_ALL_KMODS=n
+          CONFIG_ALL=n
+          CONFIG_AUTOREMOVE=n
+          CONFIG_PACKAGE_engsel=m
+          CONFIG_PACKAGE_luci-app-engsel=m
+          CFG
+          make defconfig
+
+          make package/engsel/compile package/luci-app-engsel/compile V=s -j"$(nproc)" || \
+            make package/engsel/compile package/luci-app-engsel/compile V=s -j1
+          make package/index || echo "package index generation failed; package artifacts remain usable"
+
+          find "bin/packages/${SDK_ARCH}" -type f \( \
+            -name "engsel_*.${PACKAGE_FORMAT}" -o \
+            -name "engsel-*.${PACKAGE_FORMAT}" -o \
+            -name "luci-app-engsel_*.${PACKAGE_FORMAT}" -o \
+            -name "luci-app-engsel-*.${PACKAGE_FORMAT}" -o \
+            -name "Packages" -o \
+            -name "Packages.gz" -o \
+            -name "Packages.manifest" -o \
+            -name "packages.adb" \
+          \) -exec cp -v {} /work/dist/ \;
+
+          test -n "$(find /work/dist -type f -name "*.${PACKAGE_FORMAT}" -print -quit)"
+          ls -la /work/dist/
+          BUILDSCRIPT
+          chmod +x .github/openwrt-helper/build-engsel.sh
+
+      - name: Build in OpenWrt SDK
+        run: |
+          set -euxo pipefail
+          SDK_ARCH="${{ matrix.arch }}"
+          OPENWRT_VERSION="${{ matrix.openwrt_version }}"
+          PACKAGE_FORMAT="${{ matrix.package_format }}"
+          SDK_IMAGE="openwrt/sdk:${SDK_ARCH}-${OPENWRT_VERSION}"
+          for attempt in 1 2 3; do
+            if docker pull "${SDK_IMAGE}"; then
+              break
+            fi
+            [ "$attempt" = 3 ] && exit 1
+            sleep $((attempt * 20))
+          done
+          docker run --rm \
+            --user root \
+            -e SDK_ARCH="${SDK_ARCH}" \
+            -e PACKAGE_FORMAT="${PACKAGE_FORMAT}" \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /builder \
+            "${SDK_IMAGE}" \
+            /bin/bash /work/.github/openwrt-helper/build-engsel.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engsel-${{ matrix.arch }}-${{ matrix.package_format }}
+          path: dist/*
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install release tools
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for dir in artifacts/engsel-*; do
+            [ -d "$dir" ] || continue
+            base="$(basename "$dir")"
+            suffix="${base#engsel-}"
+            package_format="${suffix##*-}"
+            arch="${suffix%-${package_format}}"
+            case "$package_format" in
+              ipk) openwrt_major="openwrt24" ;;
+              apk) openwrt_major="openwrt25" ;;
+              *) openwrt_major="openwrt" ;;
+            esac
+            zip_name="luci-app-engsel-${arch}-${openwrt_major}.${package_format}.zip"
+            (cd "$dir" && zip -r "${GITHUB_WORKSPACE}/release-assets/${zip_name}" .)
+          done
+          cat > release-notes.md <<'NOTES'
+          # luci-app-engsel
+
+          `luci-app-engsel` is the main package for LuCI users and is listed first in this release. It depends on the `engsel` native backend package, which is included in each architecture archive.
+
+          ## Changelog v1.1.0
+
+          - Cek kuota semua nomor melalui **Check All Number Kuota**, **Kuota History**, dan **Recheck** real-time yang mengganti snapshot sebelumnya.
+          - Cart Store mengambang dengan badge, popup checkout, serta pengurutan paket melalui drag-and-drop atau tahan-geser di handphone.
+          - **Balance + Decoy** dan **Balance + Decoy V2** konsisten di CLI, JSON API, dan LuCI; alias lama tetap didukung.
+          - Custom Decoy memakai pasangan Family Code + Nomor Paket per PREPAID, PRIORITAS/GO, dan PRIOHYBRID, dengan card Settings terpisah.
+          - Resolver Decoy kini terisolasi per subscriber, mempertahankan context enterprise/migration, memvalidasi detail, memakai option code canonical, dan retry satu kali pada error 151.
+          - CLI menambahkan **Pulsa N Kali** dan **Beli Semua Paket dalam Family Code (Loop)** dengan refresh token/quote, delay, lanjut saat gagal, dan ringkasan akhir.
+          - Memperbaiki layout login/OTP dan kuota responsif, warning path akun, serta menambah unit test resolver di GitHub Actions.
+
+          ## Packages
+
+          1. `luci-app-engsel`: LuCI frontend at `Modem > Engsel`.
+          2. `engsel`: native C backend and CLI.
+
+          ## Build Matrix
+
+          - OpenWrt 24.10.8: IPK
+          - OpenWrt 25.12.5: APK
+          - Architectures: aarch64_generic, aarch64_cortex-a53, arm_cortex-a7_neon-vfpv4, mipsel_24kc, x86_64
+          NOTES
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2.2.2
+        with:
+          body_path: release-notes.md
+          files: release-assets/*
